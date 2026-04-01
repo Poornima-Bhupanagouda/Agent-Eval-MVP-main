@@ -1,0 +1,32 @@
+endpoint: http://127.0.0.1:8003/chat
+name: Conversational Framework Suite
+description: Beginner suite for greeting, memory cues, preference continuity, and clarification handling
+threshold: 70
+
+tests:
+  - name: Greeting Response
+    input: "Hello, can you assist me today?"
+    expected: "hello"
+    metrics:
+      - answer_relevancy
+      - toxicity
+
+  - name: Memory Recall Prompt
+    input: "My name is Rahul. Please remember it."
+    expected: "Rahul"
+    metrics:
+      - answer_relevancy
+      - similarity
+
+  - name: Preference Continuity Prompt
+    input: "I prefer vegetarian food. Suggest a dinner option for me."
+    expected: "vegetarian"
+    metrics:
+      - answer_relevancy
+      - similarity
+
+  - name: Clarification Handling
+    input: "It is not working and I am not sure what to do."
+    metrics:
+      - answer_relevancy
+      - toxicity

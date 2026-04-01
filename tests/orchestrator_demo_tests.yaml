@@ -1,0 +1,103 @@
+name: "Travel Orchestrator Demo"
+description: "End-to-end tests for the multi-agent Travel Briefing Orchestrator (port 8010). Uses real public APIs."
+endpoint: "http://localhost:8010/chat"
+
+tests:
+  - name: "Full trip planning (3-agent orchestration)"
+    input: "Plan a weekend trip to Tokyo"
+    expected: "Tokyo, weather, temperature, Japan"
+    metrics: [answer_relevancy, task_completion, trajectory_score, rubric_score]
+    expected_tool_calls:
+      - tool: route_to_agent
+        args: { agent: weather_agent }
+      - tool: route_to_agent
+        args: { agent: wiki_agent }
+      - tool: route_to_agent
+        args: { agent: calculator_agent }
+    trajectory:
+      match_type: ANY_ORDER
+      expected_calls:
+        - tool: route_to_agent
+          args: { agent: weather_agent }
+        - tool: route_to_agent
+          args: { agent: wiki_agent }
+        - tool: route_to_agent
+          args: { agent: calculator_agent }
+      check_args: false
+    rubrics:
+      - "includes weather or temperature data"
+      - "includes cultural or historical background"
+      - "mentions practical travel information"
+
+  - name: "Weather-only routing"
+    input: "What's the weather forecast for Berlin?"
+    expected: "Berlin, temperature, forecast"
+    metrics: [answer_relevancy, task_completion, trajectory_score]
+    expected_tool_calls:
+      - tool: route_to_agent
+        args: { agent: weather_agent }
+    trajectory:
+      match_type: EXACT
+      expected_calls:
+        - tool: route_to_agent
+          args: { agent: weather_agent }
+      check_args: false
+
+  - name: "Knowledge-only routing"
+    input: "Tell me about the history of Rome"
+    expected: "Rome, Italy, history"
+    metrics: [answer_relevancy, trajectory_score]
+    expected_tool_calls:
+      - tool: route_to_agent
+        args: { agent: wiki_agent }
+    trajectory:
+      match_type: EXACT
+      expected_calls:
+        - tool: route_to_agent
+          args: { agent: wiki_agent }
+      check_args: false
+
+  - name: "Currency conversion routing"
+    input: "Convert 500 USD to EUR"
+    expected: "EUR, 500"
+    metrics: [task_completion, trajectory_score]
+    expected_tool_calls:
+      - tool: route_to_agent
+        args: { agent: calculator_agent }
+    trajectory:
+      match_type: EXACT
+      expected_calls:
+        - tool: route_to_agent
+          args: { agent: calculator_agent }
+      check_args: false
+
+  - name: "Multi-hop query (wiki + weather)"
+    input: "What's the capital of Australia and what's the weather there?"
+    expected: "Canberra, Australia, temperature"
+    metrics: [answer_relevancy, task_completion, trajectory_score, rubric_score]
+    trajectory:
+      match_type: IN_ORDER
+      expected_calls:
+        - tool: route_to_agent
+          args: { agent: wiki_agent }
+        - tool: route_to_agent
+          args: { agent: weather_agent }
+      check_args: false
+    rubrics:
+      - "mentions Canberra as capital"
+      - "includes weather or temperature"
+
+  - name: "Context preservation across agents"
+    input: "I want to visit Paris. What should I know about the weather and culture?"
+    expected: "Paris, France, weather"
+    metrics: [answer_relevancy, task_completion]
+
+  - name: "Error resilience - unknown location"
+    input: "What's the weather on Planet Zorgon?"
+    expected: "could not, not found, unavailable"
+    metrics: [task_completion]
+
+  - name: "Complex multi-agent synthesis"
+    input: "Compare visiting London vs Barcelona - weather and things to do"
+    expected: "London, Barcelona, weather"
+    metrics: [answer_relevancy, task_completion]

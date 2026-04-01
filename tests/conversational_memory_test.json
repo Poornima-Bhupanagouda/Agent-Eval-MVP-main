@@ -1,0 +1,23 @@
+{
+  "name": "Conversational Memory Check",
+  "description": "Multi-turn test to validate memory and coherence",
+  "endpoint": "http://localhost:8003/chat",
+  "turns": [
+    {
+      "role": "user",
+      "content": "My name is Rahul and I prefer vegetarian food.",
+      "expected": "Rahul"
+    },
+    {
+      "role": "user",
+      "content": "Suggest a dinner option for me.",
+      "expected": "vegetarian"
+    },
+    {
+      "role": "user",
+      "content": "What is my name?",
+      "expected": "Rahul",
+      "check_metrics": ["answer_relevancy", "coherence", "context_retention"]
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+"""
+Research Assistant - Multi-Agent Workflow
+
+A complete multi-agent system that:
+1. Plans research approach (Planner Agent)
+2. Gathers information (Researcher Agent)
+3. Synthesizes findings (Synthesizer Agent)
+4. Optionally reviews quality (Critic Agent)
+
+Each agent can use a different LLM model based on its role,
+all connected via the LLM Gateway with OAuth2 authentication.
+"""
+
+import os
+from typing import Optional, Dict
+from sample_agents.core.orchestrator import AgentOrchestrator, Agent
+from sample_agents.core.llm_client import LLMClient
+from sample_agents.core.models import WorkflowResult
+from sample_agents.agents.prompts import (
+    PLANNER_PROMPT,
+    RESEARCHER_PROMPT,
+    SYNTHESIZER_PROMPT,
+    CRITIC_PROMPT,
+)
+
+
+# Default model configurations per agent role
+# Users can override via environment variables
+DEFAULT_AGENT_MODELS = {
+    "planner": os.environ.get("PLANNER_MODEL"),      # Fast model for planning
+    "researcher": os.environ.get("RESEARCHER_MODEL"), # Capable model for research
+    "synthesizer": os.environ.get("SYNTHESIZER_MODEL"), # Creative model for synthesis
+    "critic": os.environ.get("CRITIC_MODEL"),         # Analytical model for review
+}
+
+
+class ResearchAssistant:
+    """
+    Multi-agent research assistant that combines multiple specialized agents
+    to provide comprehensive answers to user queries.
+
+    Each agent uses the LLM Gateway with OAuth2 authentication and can be
+    configured to use different models based on their specialized needs:
+
+    - Planner: Uses a fast model for quick analysis (e.g., gpt-4o-mini)
+    - Researcher: Uses a capable model for detailed research (e.g., gpt-4o)
+    - Synthesizer: Uses a creative model for synthesis (e.g., gpt-4o)
+    - Critic: Uses an analytical model for review (e.g., gpt-4o)
+
+    Workflow:
+    1. Planner: Analyzes query and creates research plan
+    2. Researcher: Gathers detailed information
+    3. Synthesizer: Combines findings into coherent answer
+    4. Critic (optional): Reviews and validates the answer
+    """
+
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        include_critic: bool = False,
+        model: Optional[str] = None,
+        agent_models: Optional[Dict[str, str]] = None,
+    ):
+        """
+        Initialize the Research Assistant.
+
+        Args:
+            llm_client: Optional pre-configured LLM client (uses LLM Gateway)
+            include_critic: Whether to include the critic review step
+            model: Optional default model override for all agents
+            agent_models: Optional dict mapping agent names to specific models
+        """
+        self.llm_client = llm_client or LLMClient(model=model)
+        self.orchestrator = AgentOrchestrator(
+            llm_client=self.llm_client,
+            default_model=model or self.llm_client.model,
+        )
+        self.include_critic = include_critic
+
+        # Merge default models with any provided overrides
+        self.agent_models = {**DEFAULT_AGENT_MODELS}
+        if agent_models:
+            self.agent_models.update(agent_models)
+
+        # Register agents with their specific models
+        self._register_agents()
+
+    def _register_agents(self) -> None:
+        """
+        Register all agents with the orchestrator.
+
+        Each agent is configured with its specific model via the LLM Gateway.
+        """
+
+        # Planner Agent - breaks down queries
+        # Uses fast model for quick analysis
+        self.orchestrator.register_agent(Agent(
+            name="planner",
+            role="planner",
+            system_prompt=PLANNER_PROMPT,
+            temperature=0.3,  # More deterministic planning
+            max_tokens=1000,
+            model=self.agent_models.get("planner"),
+        ))
+
+        # Researcher Agent - gathers information
+        # Uses capable model for detailed research
+        self.orchestrator.register_agent(Agent(
+            name="researcher",
+            role="researcher",
+            system_prompt=RESEARCHER_PROMPT,
+            temperature=0.5,
+            max_tokens=2000,
+            model=self.agent_models.get("researcher"),
+        ))
+
+        # Synthesizer Agent - creates final answer
+        # Uses creative model for synthesis
+        self.orchestrator.register_agent(Agent(
+            name="synthesizer",
+            role="synthesizer",
+            system_prompt=SYNTHESIZER_PROMPT,
+            temperature=0.7,
+            max_tokens=2000,
+            model=self.agent_models.get("synthesizer"),
+        ))
+
+        # Critic Agent - reviews quality
+        # Uses analytical model for review
+        self.orchestrator.register_agent(Agent(
+            name="critic",
+            role="critic",
+            system_prompt=CRITIC_PROMPT,
+            temperature=0.3,
+            max_tokens=1000,
+            model=self.agent_models.get("critic"),
+        ))
+
+    async def research(self, query: str) -> WorkflowResult:
+        """
+        Run the full research workflow for a query.
+
+        Args:
+            query: The user's question or research topic
+
+        Returns:
+            WorkflowResult with the final answer and all agent responses
+        """
+        # Define agent sequence
+        agent_sequence = ["planner", "researcher", "synthesizer"]
+
+        if self.include_critic:
+            agent_sequence.append("critic")
+
+        # Run workflow
+        result = await self.orchestrator.run_workflow(
+            query=query,
+            agent_sequence=agent_sequence,
+            pass_context=True,
+        )
+
+        return result
+
+    async def quick_answer(self, query: str) -> WorkflowResult:
+        """
+        Get a quick answer using only the synthesizer (single-agent mode).
+
+        Useful for simple queries that don't need full research workflow.
+
+        Args:
+            query: The user's question
+
+        Returns:
+            WorkflowResult with the answer
+        """
+        return await self.orchestrator.run_workflow(
+            query=query,
+            agent_sequence=["synthesizer"],
+            pass_context=False,
+        )
+
+    async def research_with_review(self, query: str) -> WorkflowResult:
+        """
+        Run research with mandatory critic review.
+
+        Args:
+            query: The user's question
+
+        Returns:
+            WorkflowResult with reviewed answer
+        """
+        agent_sequence = ["planner", "researcher", "synthesizer", "critic"]
+
+        return await self.orchestrator.run_workflow(
+            query=query,
+            agent_sequence=agent_sequence,
+            pass_context=True,
+        )

@@ -1,0 +1,15 @@
+#!/bin/bash
+#
+# Quick Stop Script - Kills Agent Eval processes
+#
+
+PORT="${1:-8000}"
+
+echo "Stopping Agent Eval on port $PORT..."
+
+if lsof -ti:$PORT > /dev/null 2>&1; then
+    lsof -ti:$PORT | xargs kill -9 2>/dev/null
+    echo "✓ Stopped"
+else
+    echo "✓ No process running on port $PORT"
+fi

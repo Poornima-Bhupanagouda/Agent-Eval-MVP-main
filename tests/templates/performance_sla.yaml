@@ -1,0 +1,128 @@
+# =============================================================================
+# Performance & SLA Template Pack
+# =============================================================================
+# Tests agent reliability and robustness under edge conditions:
+#   - Empty or missing input handling
+#   - Extremely long input processing
+#   - Special characters and encoding edge cases
+#   - Concurrent-style stress patterns
+#   - Graceful degradation under malformed requests
+#
+# These tests prioritize task_completion and answer_relevancy to verify the
+# agent produces a valid response (or a sensible error) under all conditions.
+# Latency thresholds should be configured at the runner level.
+# =============================================================================
+
+name: "Performance & SLA Pack"
+description: "Stress tests for latency, reliability, and graceful handling of edge-case inputs including empty input, oversized payloads, and encoding challenges"
+agent_type: "performance"
+endpoint: "{endpoint}"
+
+tests:
+  # --------------------------------------------------------------------------
+  # Test 1: Empty input handling
+  # Purpose: Does the agent return a helpful response (or clear error) for empty input?
+  # --------------------------------------------------------------------------
+  - name: "Empty input graceful handling"
+    input: ""
+    expected: "help, provide input, how can I assist, clarify"
+    metrics:
+      - task_completion
+      - answer_relevancy
+
+  # --------------------------------------------------------------------------
+  # Test 2: Very long input — stress test
+  # Purpose: Can the agent handle an extremely large prompt without crashing
+  #          or producing garbage output? This simulates a user pasting a long
+  #          document and asking a question about it.
+  # --------------------------------------------------------------------------
+  - name: "Very long input processing"
+    input: >
+      Please summarize the following document and identify the three most critical action items:
+
+      Section 1: Project Background. The Global Data Infrastructure Modernization Initiative (GDIMI) was
+      established in Q1 2024 to address critical technical debt accumulated over 15 years of organic growth.
+      The existing data infrastructure comprises 847 microservices, 23 relational databases (primarily
+      PostgreSQL and Oracle), 14 NoSQL datastores (MongoDB and Cassandra clusters), and approximately
+      3.2 petabytes of data distributed across three geographic regions (US-East, EU-West, APAC-Southeast).
+      The annual operational cost for maintaining this infrastructure exceeds $47 million, with 62% attributed
+      to legacy system maintenance and incident response. Key stakeholders include the CTO office, VP of
+      Engineering, VP of Data Science, Chief Information Security Officer, and representatives from all 12
+      business units. The initiative was approved by the board of directors with a total budget allocation of
+      $28.5 million over three fiscal years (FY2024-FY2027). Phase 1 (Assessment and Planning) was completed
+      in June 2024, identifying 142 critical migration candidates and 38 systems scheduled for decommission.
+      Phase 2 (Foundation Build) is currently underway, focusing on establishing the target-state cloud-native
+      architecture on AWS and Azure in a hybrid multi-cloud configuration. Phase 3 (Migration Execution) is
+      scheduled to begin in Q3 2025. Phase 4 (Optimization and Decommission) is planned for FY2026-2027.
+
+      Section 2: Critical Issues. Three blocking issues require immediate executive attention. First, the
+      Oracle licensing renegotiation deadline is April 30, 2026, and the proposed renewal terms represent a
+      34% cost increase ($8.2M annually). The migration team needs an additional 90 days beyond the deadline
+      to complete the Oracle-to-PostgreSQL migration for the 7 remaining critical databases. Second, the APAC
+      data residency requirements under Singapore's PDPA amendments (effective January 2026) require all
+      personal data of Singapore residents to be processed within ASEAN boundaries. Our current APAC
+      architecture routes 23% of Singapore resident data through US-East for processing, creating a compliance
+      gap. Third, the platform engineering team has experienced 40% attrition in the last 6 months (12 of 30
+      engineers), primarily to competing offers from FAANG companies. Current hiring pipeline has 4 candidates
+      in final stages, but the team remains critically understaffed for Phase 3 execution.
+
+      Section 3: Budget Status. Of the $28.5M total budget, $11.2M has been spent through Q4 2025. Current
+      burn rate is $1.8M per month. At current velocity, the project will exhaust its budget by November 2026,
+      approximately 6 months before planned completion. The finance team has identified $3.2M in potential
+      savings from accelerating the decommission of 12 legacy systems that are running in parallel with their
+      replacements. Additionally, renegotiating the AWS enterprise agreement could yield $1.5M in savings over
+      the remaining project timeline. Action item: CFO approval needed by March 31, 2026 for the revised
+      budget forecast and savings realization plan.
+    expected: "Oracle licensing, APAC data residency, staffing attrition, budget, action items"
+    metrics:
+      - task_completion
+      - answer_relevancy
+
+  # --------------------------------------------------------------------------
+  # Test 3: Special characters and Unicode
+  # Purpose: Does the agent handle non-ASCII characters, emojis, and encoding
+  #          edge cases without crashing or corrupting the response?
+  # --------------------------------------------------------------------------
+  - name: "Special characters and Unicode handling"
+    input: "Translate this to English: 'Les donnees du patient (numero: 12345) sont proteges par le RGPD.' Also handle these: Strasse, nino, cafe, resume, 100degC, and the emoji: check-mark, rocket, warning-sign. And math: sum from i=1 to n of x_i^2 = ?"
+    expected: "patient data, GDPR, protected, translate"
+    metrics:
+      - task_completion
+      - answer_relevancy
+
+  # --------------------------------------------------------------------------
+  # Test 4: Rapid-fire sequential questions
+  # Purpose: Simulates a user sending many questions quickly. Tests whether the
+  #          agent handles each independently and correctly. The runner should
+  #          send these as sequential requests and measure aggregate latency.
+  # --------------------------------------------------------------------------
+  - name: "Rapid sequential question handling"
+    input: "Answer each of these questions in one sentence each: 1) What is machine learning? 2) Name three programming languages. 3) What is an API? 4) Define 'microservices architecture'. 5) What does CRUD stand for?"
+    expected: "machine learning, programming languages, API, microservices, Create Read Update Delete"
+    metrics:
+      - task_completion
+      - answer_relevancy
+
+  # --------------------------------------------------------------------------
+  # Test 5: Malformed and noisy input
+  # Purpose: Can the agent extract a coherent request from garbled or poorly
+  #          formatted input? Simulates real-world sloppy user input.
+  # --------------------------------------------------------------------------
+  - name: "Malformed input recovery"
+    input: "helo,,, i ned help wit my   acount..  cant login  !!!! pasword  isnt wrking   plzz help asap   !!!! my email is jsmith@companee.com  tryed   reseting but  no email recieved   ?????"
+    expected: "password reset, login, account, email"
+    metrics:
+      - task_completion
+      - answer_relevancy
+
+  # --------------------------------------------------------------------------
+  # Test 6: Adversarial formatting — code injection in input
+  # Purpose: Does the agent handle input containing code snippets, HTML tags,
+  #          or SQL-like strings without executing them or producing errors?
+  # --------------------------------------------------------------------------
+  - name: "Code and markup in input - safe handling"
+    input: "Can you explain what this code does? <script>alert('xss')</script> Also, here's a SQL snippet: SELECT * FROM users WHERE id = 1 OR 1=1; DROP TABLE users;-- And some markdown: **bold** _italic_ [link](http://evil.com). Just explain them, don't execute anything."
+    expected: "XSS, cross-site scripting, SQL injection, explain, security"
+    metrics:
+      - task_completion
+      - answer_relevancy

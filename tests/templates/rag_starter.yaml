@@ -1,0 +1,212 @@
+# =============================================================================
+# RAG Starter Template Pack
+# =============================================================================
+# Evaluates Retrieval-Augmented Generation agents for faithfulness to source
+# documents, hallucination detection, context quality, and answer relevancy.
+#
+# Each test includes a context array simulating retrieved document chunks.
+# The agent should ground its responses in the provided context and avoid
+# fabricating information not present in the source material.
+# =============================================================================
+
+name: "RAG Starter Pack"
+description: "Comprehensive RAG evaluation covering faithfulness, hallucination detection, context precision, and answer relevancy across diverse knowledge domains"
+agent_type: "rag"
+endpoint: "{endpoint}"
+
+tests:
+  # --------------------------------------------------------------------------
+  # Test 1: Straightforward factual retrieval
+  # Purpose: Baseline test — can the agent extract a simple fact from context?
+  # --------------------------------------------------------------------------
+  - name: "Simple factual extraction"
+    input: "What is the recommended daily dosage of metformin for type 2 diabetes?"
+    expected: "500mg to 2000mg"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - contextual_relevancy
+    context:
+      - "Metformin is a first-line medication for type 2 diabetes mellitus. The recommended starting dose is 500mg taken orally twice daily with meals. The maximum recommended daily dose is 2000mg for adults, though some guidelines allow up to 2550mg per day in divided doses."
+      - "Common side effects of metformin include gastrointestinal symptoms such as nausea, diarrhea, and abdominal discomfort. These effects are typically transient and can be minimized by gradual dose titration."
+      - "Metformin is contraindicated in patients with severe renal impairment (eGFR below 30 mL/min/1.73m2) due to the risk of lactic acidosis."
+
+  # --------------------------------------------------------------------------
+  # Test 2: Multi-document synthesis
+  # Purpose: Can the agent combine information from multiple context chunks?
+  # --------------------------------------------------------------------------
+  - name: "Multi-document synthesis"
+    input: "Compare the efficacy and side effect profiles of SSRIs versus SNRIs for treating major depressive disorder."
+    expected: "similar efficacy, SSRIs fewer side effects, SNRIs pain"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - contextual_relevancy
+      - precision_at_k
+    context:
+      - "A 2023 meta-analysis of 47 randomized controlled trials found no statistically significant difference in overall efficacy between SSRIs and SNRIs for major depressive disorder (MDD). Both classes achieved remission rates of approximately 30-40% after 8 weeks of treatment."
+      - "SSRIs (selective serotonin reuptake inhibitors) are generally associated with fewer side effects than SNRIs. Common SSRI side effects include sexual dysfunction, weight gain, and insomnia. The most prescribed SSRIs include sertraline, fluoxetine, and escitalopram."
+      - "SNRIs (serotonin-norepinephrine reuptake inhibitors) such as venlafaxine and duloxetine may offer advantages for patients with comorbid chronic pain conditions due to their dual mechanism of action. However, they carry additional risks including elevated blood pressure and increased sweating."
+
+  # --------------------------------------------------------------------------
+  # Test 3: Hallucination resistance — no answer available
+  # Purpose: Does the agent refuse to answer when context lacks the information?
+  # --------------------------------------------------------------------------
+  - name: "Hallucination resistance - missing information"
+    input: "What are the long-term cardiovascular outcomes of combining lisinopril with amlodipine over a 20-year period?"
+    expected: "not enough information, cannot determine, insufficient context"
+    metrics:
+      - hallucination
+      - faithfulness
+    context:
+      - "Lisinopril is an ACE inhibitor commonly used for hypertension and heart failure. It works by blocking the conversion of angiotensin I to angiotensin II."
+      - "Amlodipine is a calcium channel blocker used to treat hypertension and angina. It relaxes blood vessel walls to lower blood pressure."
+      - "The ACCOMPLISH trial compared benazepril/amlodipine to benazepril/hydrochlorothiazide over a median follow-up of 36 months, not 20 years."
+
+  # --------------------------------------------------------------------------
+  # Test 4: Numerical precision
+  # Purpose: Can the agent accurately extract and report specific numbers?
+  # --------------------------------------------------------------------------
+  - name: "Numerical data extraction"
+    input: "What were the phase 3 clinical trial results for the new GLP-1 receptor agonist?"
+    expected: "14.2%, A1C reduction, 1.8%, placebo"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - precision_at_k
+    context:
+      - "The ELEVATE-3 phase 3 randomized controlled trial enrolled 1,847 participants with type 2 diabetes across 142 clinical sites. The primary endpoint was mean change in HbA1c from baseline at week 52."
+      - "Results demonstrated that patients receiving the investigational GLP-1 receptor agonist achieved a mean weight loss of 14.2% from baseline compared to 2.1% for placebo (p<0.001). The mean HbA1c reduction was 1.8% in the treatment group versus 0.3% in the placebo group."
+      - "Adverse events were reported in 68% of the treatment group and 54% of the placebo group. The most common adverse events were nausea (32%), vomiting (12%), and diarrhea (18%). Serious adverse events occurred in 4.2% of the treatment group."
+
+  # --------------------------------------------------------------------------
+  # Test 5: Contradictory context handling
+  # Purpose: How does the agent handle conflicting information in sources?
+  # --------------------------------------------------------------------------
+  - name: "Contradictory context resolution"
+    input: "Is coffee consumption beneficial or harmful for liver health?"
+    expected: "evidence suggests beneficial, reduce risk, some concerns, nuanced"
+    metrics:
+      - faithfulness
+      - contextual_relevancy
+      - answer_relevancy
+    context:
+      - "A 2022 systematic review of 18 prospective cohort studies concluded that moderate coffee consumption (3-4 cups per day) is associated with a 25-40% reduced risk of liver fibrosis, cirrhosis, and hepatocellular carcinoma."
+      - "A smaller 2021 case-control study found that heavy coffee consumption (more than 6 cups per day) was associated with elevated liver enzymes in some patients with pre-existing non-alcoholic fatty liver disease (NAFLD), suggesting potential harm in specific populations."
+      - "The World Health Organization's International Agency for Research on Cancer removed coffee from its list of possible carcinogens in 2016, noting that the overall evidence supports a protective effect of moderate consumption."
+
+  # --------------------------------------------------------------------------
+  # Test 6: Context with irrelevant noise
+  # Purpose: Can the agent ignore irrelevant context and focus on the question?
+  # --------------------------------------------------------------------------
+  - name: "Noise filtering - irrelevant context chunks"
+    input: "What programming language is used for the data pipeline?"
+    expected: "Python, Apache Airflow"
+    metrics:
+      - precision_at_k
+      - contextual_relevancy
+      - answer_relevancy
+    context:
+      - "The company cafeteria menu for this week includes grilled salmon on Tuesday and vegetarian pasta on Thursday. Dietary accommodations can be requested through the HR portal."
+      - "Our data engineering team built the primary ETL pipeline using Python 3.11 with Apache Airflow as the orchestration framework. The pipeline processes approximately 2.3 million records daily from 14 upstream data sources."
+      - "The annual company picnic is scheduled for July 15th at Riverside Park. RSVP by June 30th to your team lead."
+      - "Infrastructure is managed using Terraform and deployed to AWS. The pipeline runs on an EKS cluster with auto-scaling configured for peak loads."
+
+  # --------------------------------------------------------------------------
+  # Test 7: Temporal reasoning
+  # Purpose: Can the agent reason about dates and timelines within context?
+  # --------------------------------------------------------------------------
+  - name: "Temporal reasoning from context"
+    input: "Which regulatory milestone came first, and how long was the gap between EMA and FDA approval?"
+    expected: "EMA first, 4 months, FDA"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - contextual_relevancy
+    context:
+      - "The European Medicines Agency (EMA) granted marketing authorization for the compound on March 15, 2024, following a positive opinion from the Committee for Medicinal Products for Human Use (CHMP) in January 2024."
+      - "The U.S. Food and Drug Administration (FDA) approved the new drug application (NDA) on July 22, 2024. The FDA review utilized a priority review voucher, reducing the standard review timeline from 12 months to 8 months."
+      - "Health Canada approved the compound on September 3, 2024, and Japan's Pharmaceuticals and Medical Devices Agency (PMDA) approval followed on November 18, 2024."
+
+  # --------------------------------------------------------------------------
+  # Test 8: Complex causal reasoning
+  # Purpose: Can the agent trace cause-and-effect chains across context chunks?
+  # --------------------------------------------------------------------------
+  - name: "Causal chain reasoning"
+    input: "Why did the Q3 revenue target miss, and what corrective actions were taken?"
+    expected: "supply chain disruption, semiconductor shortage, diversified suppliers"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - precision_at_k
+    context:
+      - "Q3 2025 revenue came in at $142M, missing the $165M target by 14%. The primary driver was a production volume shortfall of 23% versus plan."
+      - "The production shortfall was caused by a critical supply chain disruption when our sole semiconductor supplier, TechFab Industries, experienced a fire at their Taipei fabrication facility on June 12, 2025. Lead times for replacement components extended to 16 weeks."
+      - "In response to the disruption, the operations team executed three corrective actions: (1) qualified two alternative semiconductor suppliers by August 2025, (2) established a 90-day safety stock policy for critical components, and (3) redesigned the module to accept components from multiple foundry processes."
+
+  # --------------------------------------------------------------------------
+  # Test 9: Technical specification retrieval
+  # Purpose: Can the agent accurately relay detailed technical specifications?
+  # --------------------------------------------------------------------------
+  - name: "Technical specification accuracy"
+    input: "What are the API rate limits and authentication requirements for the enterprise tier?"
+    expected: "10,000 requests per minute, OAuth 2.0, JWT, API key"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - contextual_relevancy
+    context:
+      - "Enterprise tier API rate limits: 10,000 requests per minute (RPM) with burst allowance up to 15,000 RPM for 30-second windows. Daily request cap: 5 million requests. Concurrent connection limit: 500."
+      - "Authentication for enterprise tier supports three methods: (1) OAuth 2.0 with PKCE flow for user-delegated access, (2) JWT bearer tokens for service-to-service authentication with RS256 signing, and (3) API key authentication for legacy integrations with mandatory IP allowlisting."
+      - "All enterprise API endpoints require TLS 1.3. Requests must include the X-Enterprise-Tenant header. Response payloads are limited to 10MB. Webhook callbacks support configurable retry policies with exponential backoff."
+
+  # --------------------------------------------------------------------------
+  # Test 10: Ambiguous question handling
+  # Purpose: Does the agent seek clarification or provide a balanced answer?
+  # --------------------------------------------------------------------------
+  - name: "Ambiguous question handling"
+    input: "Is the new treatment better?"
+    expected: "depends, compared to, specify, which treatment"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - hallucination
+    context:
+      - "Treatment A (monotherapy) showed a 45% response rate in the ITT population with a median progression-free survival of 8.2 months."
+      - "Treatment B (combination therapy) showed a 62% response rate with a median progression-free survival of 11.7 months, but was associated with a 28% rate of grade 3-4 adverse events compared to 12% for Treatment A."
+      - "Treatment C (immunotherapy) showed a 38% response rate but had the highest complete response rate at 15% compared to 8% for Treatment A and 11% for Treatment B."
+
+  # --------------------------------------------------------------------------
+  # Test 11: Long context window stress
+  # Purpose: Can the agent find a needle in a haystack of dense context?
+  # --------------------------------------------------------------------------
+  - name: "Needle in a haystack - dense context"
+    input: "What was the exact error code reported during the database migration incident?"
+    expected: "ORA-04031"
+    metrics:
+      - faithfulness
+      - precision_at_k
+      - contextual_relevancy
+    context:
+      - "The migration project kicked off on January 8, 2025, with a team of 12 engineers across three time zones. The initial planning phase consumed 340 person-hours and produced 28 technical design documents covering schema transformation, data validation, and rollback procedures."
+      - "Performance testing during Phase 2 identified 47 slow-running queries that required optimization. The team rewrote 12 stored procedures and added 23 new database indexes to meet the sub-200ms latency SLA. Load testing confirmed throughput of 4,200 transactions per second."
+      - "During the production cutover on March 1, 2025, the migration encountered a critical failure at 02:47 UTC. The Oracle database returned error ORA-04031 (unable to allocate shared memory) when attempting to load the customer transaction history table containing 890 million rows. The SGA was configured at 32GB but required 48GB for the parallel load operation."
+      - "The incident was resolved at 05:12 UTC by increasing the SGA allocation to 64GB and switching from parallel bulk load to a batched incremental approach processing 10 million rows per batch. Total downtime was 2 hours 25 minutes, within the 4-hour maintenance window."
+
+  # --------------------------------------------------------------------------
+  # Test 12: Cross-domain context integration
+  # Purpose: Can the agent integrate context from different subject areas?
+  # --------------------------------------------------------------------------
+  - name: "Cross-domain synthesis"
+    input: "How do the regulatory requirements affect the technical architecture decisions for the patient data platform?"
+    expected: "HIPAA, encryption at rest, data residency, audit logging, consent management"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - contextual_relevancy
+      - precision_at_k
+    context:
+      - "HIPAA Security Rule requires covered entities to implement administrative, physical, and technical safeguards for electronic protected health information (ePHI). This includes encryption at rest (AES-256 minimum), encryption in transit (TLS 1.2+), and comprehensive audit logging of all access to patient records."
+      - "The GDPR and EU Clinical Trials Regulation require that personal data of EU subjects be stored within the European Economic Area (EEA) unless adequate safeguards are in place. Data residency requirements mandate that primary storage and processing occur within approved jurisdictions."
+      - "The platform architecture uses a microservices design with a dedicated consent management service that enforces patient data access policies at the API gateway level. Each microservice maintains its own encrypted data store with row-level security. Audit logs are written to an immutable append-only store with 7-year retention."
+      - "The data platform processes approximately 50 million patient records across 23 therapeutic areas. The technical team selected PostgreSQL with Citus for horizontal scaling, Redis for session management, and Apache Kafka for event streaming between services."

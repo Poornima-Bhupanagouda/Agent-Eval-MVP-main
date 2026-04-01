@@ -1,0 +1,37 @@
+endpoint: http://127.0.0.1:8002/chat
+name: HR RAG Framework Suite
+description: Core HR policy checks for benefits start date, PTO tiers, 401(k), and parental leave
+threshold: 70
+
+tests:
+  - name: Health Insurance Start Date
+    input: "When does health insurance coverage start for new employees?"
+    expected: "first day of the month following hire date"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - similarity
+
+  - name: PTO Tier For 4 Years
+    input: "How many PTO days does an employee with 4 years of service get?"
+    expected: "20 days"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - similarity
+
+  - name: 401k Match Policy
+    input: "What is the company 401(k) match policy?"
+    expected: "100% of first 3% and 50% of next 2%, max 4%"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - hallucination
+
+  - name: Parental Leave Policy
+    input: "How many weeks of paid parental leave are offered for primary and secondary caregivers?"
+    expected: "16 weeks primary, 4 weeks secondary"
+    metrics:
+      - answer_relevancy
+      - faithfulness
+      - similarity

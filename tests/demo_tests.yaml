@@ -1,0 +1,44 @@
+# Sample Test Suite for Demo Agent
+# Run with: agent-eval run tests/demo_tests.yaml
+
+endpoint: http://localhost:8003/chat
+name: Demo Agent Tests
+description: Basic tests for the sample chat agent
+threshold: 70
+
+tests:
+  # Simple greeting test
+  - name: Basic Greeting
+    input: "Hello"
+    expected: "Hello! How can I help you today?"
+    metrics:
+      - answer_relevancy
+      - toxicity
+
+  # Knowledge test
+  - name: Capital of France
+    input: "What is the capital of France?"
+    expected: "Paris"
+    metrics:
+      - answer_relevancy
+      - similarity
+
+  # Programming knowledge test
+  - name: Python Definition
+    input: "What is Python?"
+    expected: "Python is a programming language"
+    metrics:
+      - answer_relevancy
+      - similarity
+      - toxicity
+
+  # RAG-style test with context
+  - name: RAG Context Test
+    input: "What is the refund policy?"
+    context:
+      - "Our company offers a 30-day money-back guarantee."
+      - "Refunds are processed within 5-7 business days."
+    expected: "30 days"
+    metrics:
+      - faithfulness
+      - answer_relevancy

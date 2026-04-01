@@ -1,0 +1,204 @@
+# =============================================================================
+# Conversation Flow Template Pack
+# =============================================================================
+# Evaluates multi-turn conversational agents for:
+#   - Context retention across turns
+#   - Coherent dialogue management
+#   - Coreference resolution (pronouns, implicit references)
+#   - Task completion across extended interactions
+#   - Graceful handling of topic shifts and corrections
+#   - Conversation repair and clarification
+#
+# Each test uses a `turns` array with role/content pairs to simulate
+# realistic multi-turn dialogues.
+# =============================================================================
+
+name: "Conversation Flow Pack"
+description: "Multi-turn conversation evaluation testing context retention, coherence, coreference resolution, and task completion across extended dialogues"
+agent_type: "conversational"
+endpoint: "{endpoint}"
+
+tests:
+  # --------------------------------------------------------------------------
+  # Test 1: Basic context retention
+  # Purpose: Can the agent remember facts stated earlier in the conversation?
+  # --------------------------------------------------------------------------
+  - name: "Basic context retention across turns"
+    turns:
+      - role: "user"
+        content: "My name is Sarah and I'm a data scientist at Meridian Health. I work primarily with clinical trial data."
+      - role: "assistant"
+        content: "Nice to meet you, Sarah! It sounds like you work on some fascinating data at Meridian Health. How can I help you with your clinical trial work today?"
+      - role: "user"
+        content: "I need help writing a SQL query to find patients who dropped out of the BEACON-2 trial."
+      - role: "assistant"
+        content: "I can help with that. To write an accurate query for the BEACON-2 trial dropout analysis, I need to know a few things about your schema. What table stores participant status, and what column indicates withdrawal or dropout?"
+      - role: "user"
+        content: "The table is trial_participants with a status column. Now, remind me — what company do I work for and what kind of data do I usually work with?"
+    expected: "Meridian Health, clinical trial data"
+    metrics:
+      - context_retention
+      - coherence
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 2: Coreference resolution
+  # Purpose: Can the agent resolve pronouns and implicit references correctly?
+  # --------------------------------------------------------------------------
+  - name: "Pronoun and coreference resolution"
+    turns:
+      - role: "user"
+        content: "I'm comparing two cloud providers for our machine learning workloads. AWS has SageMaker and GCP has Vertex AI."
+      - role: "assistant"
+        content: "Both are strong platforms for ML. AWS SageMaker offers a mature ecosystem with broad model support, while GCP Vertex AI has tight integration with BigQuery and TensorFlow. What specific ML workloads are you evaluating?"
+      - role: "user"
+        content: "We need to train large language models. The first one supports distributed training natively. Does the second one also support it?"
+      - role: "assistant"
+        content: "Yes, GCP Vertex AI also supports distributed training. It offers custom training jobs with multi-node GPU clusters. Would you like a detailed comparison of distributed training capabilities?"
+      - role: "user"
+        content: "Yes. Also, which one is generally cheaper for that use case?"
+    expected: "cost comparison, AWS, GCP, distributed training, pricing"
+    metrics:
+      - coherence
+      - context_retention
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 3: User correction handling
+  # Purpose: Does the agent gracefully accept corrections and update its understanding?
+  # --------------------------------------------------------------------------
+  - name: "Graceful correction handling"
+    turns:
+      - role: "user"
+        content: "I need to set up a CI/CD pipeline for our Python project using Jenkins."
+      - role: "assistant"
+        content: "I can help you set up a Jenkins pipeline for your Python project. Let's start with a Jenkinsfile. Do you want declarative or scripted pipeline syntax?"
+      - role: "user"
+        content: "Actually, sorry — I meant GitHub Actions, not Jenkins. We switched last month."
+      - role: "assistant"
+        content: "No problem! Let's set up GitHub Actions instead. We'll create a workflow YAML file in .github/workflows/. Do you need it to run tests, linting, or also handle deployment?"
+      - role: "user"
+        content: "Tests and linting. And remember, it's a Python project. Can you draft the workflow file?"
+    expected: "GitHub Actions, Python, pytest, linting, workflow YAML"
+    metrics:
+      - coherence
+      - context_retention
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 4: Incremental task building
+  # Purpose: Can the agent build on prior turns to progressively complete a complex task?
+  # --------------------------------------------------------------------------
+  - name: "Progressive task completion"
+    turns:
+      - role: "user"
+        content: "I want to build a REST API. Let's use FastAPI with Python."
+      - role: "assistant"
+        content: "Great choice. FastAPI is fast and developer-friendly. What resources will your API manage? For example, users, products, orders?"
+      - role: "user"
+        content: "It's a patient management system. We need endpoints for patients, appointments, and medical records."
+      - role: "assistant"
+        content: "Got it. I'll structure the API with three main routers: /patients, /appointments, and /records. Should I start with the data models or the endpoint definitions?"
+      - role: "user"
+        content: "Start with the data models. Each patient has an ID, name, date of birth, and a list of conditions."
+      - role: "assistant"
+        content: "Here's a Pydantic model for Patient with those fields. Should I add the Appointment and MedicalRecord models next?"
+      - role: "user"
+        content: "Yes. Appointments should link to a patient ID and have a datetime, provider name, and status. Now generate the full models file."
+    expected: "Patient model, Appointment model, patient_id, datetime, provider, status, Pydantic"
+    metrics:
+      - context_retention
+      - coherence
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 5: Topic switching and return
+  # Purpose: Can the agent handle an abrupt topic change and return to the original topic?
+  # --------------------------------------------------------------------------
+  - name: "Topic switch and return"
+    turns:
+      - role: "user"
+        content: "Help me debug this error: 'ModuleNotFoundError: No module named pandas' in my data pipeline."
+      - role: "assistant"
+        content: "This error means pandas isn't installed in your current Python environment. Try running: pip install pandas. If you're using a virtual environment, make sure it's activated first. What environment are you using?"
+      - role: "user"
+        content: "Wait, quick side question — what's the weather like in Indianapolis today?"
+      - role: "assistant"
+        content: "I don't have access to real-time weather data, so I can't tell you the current conditions in Indianapolis. You can check weather.gov or a weather app for that. Would you like to get back to debugging the pandas import error?"
+      - role: "user"
+        content: "Yes, let's go back to the pandas issue. I'm using a Docker container. The package was in requirements.txt but it seems like it wasn't installed."
+    expected: "Docker, requirements.txt, pip install, build stage, image layer"
+    metrics:
+      - context_retention
+      - coherence
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 6: Clarification seeking
+  # Purpose: Does the agent ask for necessary details before proceeding with an ambiguous request?
+  # --------------------------------------------------------------------------
+  - name: "Clarification seeking for ambiguous request"
+    turns:
+      - role: "user"
+        content: "Can you set up the database for me?"
+      - role: "assistant"
+        content: "I'd be happy to help with the database setup. I have a few questions first: What database system are you using (PostgreSQL, MySQL, MongoDB, etc.)? Is this for a new project or existing? And what kind of data will it store?"
+      - role: "user"
+        content: "PostgreSQL, new project, it's for an e-commerce platform."
+      - role: "assistant"
+        content: "For an e-commerce PostgreSQL database, we'll want tables for users, products, orders, order_items, categories, and likely reviews. Should I also include inventory tracking and payment records?"
+      - role: "user"
+        content: "Yes to inventory, no to payments — we use Stripe for that. Go ahead and draft the schema."
+    expected: "CREATE TABLE, users, products, orders, inventory, PostgreSQL, foreign key"
+    metrics:
+      - coherence
+      - context_retention
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 7: Emotional tone adaptation
+  # Purpose: Does the agent adjust tone when the user expresses frustration?
+  # --------------------------------------------------------------------------
+  - name: "Emotional tone adaptation"
+    turns:
+      - role: "user"
+        content: "I've been trying to deploy this app for THREE DAYS and nothing works. The Kubernetes pods keep crashing and I'm about to give up."
+      - role: "assistant"
+        content: "I understand how frustrating that must be — three days of deployment issues is exhausting. Let's work through this methodically. Can you share the output of 'kubectl describe pod <pod-name>' and 'kubectl logs <pod-name>'? Those will tell us exactly why the pods are crashing."
+      - role: "user"
+        content: "The logs say 'OOMKilled'. I already tried increasing memory limits but it didn't help."
+      - role: "assistant"
+        content: "OOMKilled means the container is exceeding its memory limit. Since increasing limits didn't help, the application itself likely has a memory leak. What runtime is your app using? (Node.js, Java, Python, etc.) That will help us pinpoint the leak."
+      - role: "user"
+        content: "It's a Java Spring Boot app. It was working fine locally with 512MB."
+    expected: "Java heap, JVM memory, -Xmx, container memory, Spring Boot, memory settings"
+    metrics:
+      - coherence
+      - context_retention
+      - task_completion
+
+  # --------------------------------------------------------------------------
+  # Test 8: Long conversation with accumulated constraints
+  # Purpose: Can the agent maintain all stated constraints across many turns?
+  # --------------------------------------------------------------------------
+  - name: "Accumulated constraints tracking"
+    turns:
+      - role: "user"
+        content: "I need a vacation recommendation. Budget is $3000 max for two people."
+      - role: "assistant"
+        content: "I can help with that! A $3000 budget for two gives us good options. What kind of vacation are you looking for — beach, city, adventure, or cultural? And when are you planning to travel?"
+      - role: "user"
+        content: "Beach vacation in September. But we need direct flights from Chicago."
+      - role: "assistant"
+        content: "Great parameters: beach, September, direct flights from Chicago (ORD), under $3000 for two. Some popular options with direct flights from ORD include Cancun, Puerto Vallarta, and several Caribbean islands. Any preferences on domestic vs. international?"
+      - role: "user"
+        content: "International is fine. Oh, and my partner is vegan so the destination needs to have good vegan food options."
+      - role: "assistant"
+        content: "Adding vegan-friendly dining to our criteria. Cancun and Puerto Vallarta both have growing vegan scenes. Costa Rica is also excellent for plant-based food. Want me to narrow it to a top 3 with estimated costs?"
+      - role: "user"
+        content: "Yes, and one more thing — no resorts. We prefer boutique hotels or Airbnbs. Give me your top 3 with all our requirements in mind."
+    expected: "$3000, two people, beach, September, direct flights, Chicago, vegan, no resorts, boutique"
+    metrics:
+      - context_retention
+      - coherence
+      - task_completion

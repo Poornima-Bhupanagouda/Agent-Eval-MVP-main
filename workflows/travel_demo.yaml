@@ -1,0 +1,21 @@
+name: "Travel Demo"
+description: "Multi-agent travel planning. The orchestrator routes queries to Weather, Wiki, and Calculator agents and synthesizes their responses."
+orchestrator:
+  name: "Travel Orchestrator"
+  endpoint: "http://127.0.0.1:8010/chat"
+  health_path: "/health"
+  tags: ["demo", "travel-fleet", "orchestrator"]
+sub_agents:
+  - name: "Weather Agent"
+    endpoint: "http://127.0.0.1:8004/chat"
+    health_path: "/health"
+    tags: ["demo", "travel-fleet"]
+  - name: "Wiki Agent"
+    endpoint: "http://127.0.0.1:8005/chat"
+    health_path: "/health"
+    tags: ["demo", "travel-fleet"]
+  - name: "Calculator Agent"
+    endpoint: "http://127.0.0.1:8006/chat"
+    health_path: "/health"
+    tags: ["demo", "travel-fleet"]
+test_suite: "tests/orchestrator_demo_tests.yaml"
