@@ -5,10 +5,18 @@ Simple evaluator powered by DeepEval with smart metric selection.
 """
 
 import os
+import time
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Optional, List, Any
 from concurrent.futures import ThreadPoolExecutor
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +29,7 @@ class EvalResult:
     passed: bool
     reason: str
     details: Optional[dict] = None
+    scored_by: str = "heuristic"  # "deepeval" or "heuristic"
 
 
 class Evaluator:
@@ -31,7 +40,27 @@ class Evaluator:
     - Smart metric auto-selection based on available data
     - Threshold-based pass/fail
     - Graceful fallback when DeepEval unavailable
+    - Cached OAuth2 token and GPTModel for performance
+    - Parallel metric execution within a single evaluate() call
     """
+
+    # Metrics that require LLM intelligence (meaning understanding).
+    # Everything else is evaluated via fast heuristic keyword matching.
+    DEEPEVAL_ONLY_METRICS = {
+        "answer_relevancy", "toxicity", "bias",
+        "faithfulness", "hallucination", "contextual_relevancy",
+    }
+
+    # Shared thread pool for DeepEval evaluations (reused across calls)
+    # Shared thread pool for DeepEval evaluations.
+    # 8 workers allows all turns' DeepEval metrics to run concurrently.
+    _thread_pool = ThreadPoolExecutor(max_workers=8)
+
+    # Cached OAuth2 token and GPTModel (class-level, shared across instances)
+    _cached_token: Optional[str] = None
+    _cached_token_expiry: float = 0  # epoch seconds
+    _cached_gpt_model: Any = None
+    _cached_gpt_model_name: Optional[str] = None
 
     # Available metrics
     METRICS = {
@@ -140,7 +169,8 @@ class Evaluator:
             model: LLM model to use for evaluations
             threshold: Default pass threshold (0-100)
         """
-        self.model = model
+        # Use DEPLOYMENT_MODEL from .env if set, otherwise fall back to parameter
+        self.model = os.getenv("DEPLOYMENT_MODEL", model)
         self.threshold = threshold
         self._deepeval_available = self._check_deepeval()
 
@@ -170,63 +200,72 @@ class Evaluator:
     ) -> List[EvalResult]:
         """
         Run evaluation with smart metric selection.
-
-        Args:
-            input_text: The input/question sent to the agent
-            output: The agent's response
-            expected: Expected/ground truth answer (optional)
-            context: Retrieved context documents (optional, for RAG)
-            metrics: List of metrics to run (auto-selected if None)
-            threshold: Pass threshold (uses default if None)
-            tool_calls: Actual tool calls made by the agent (optional)
-            expected_tool_calls: Expected tool calls for validation (optional)
-            conversation_history: Previous turns for coherence/retention (optional)
-
-        Returns:
-            List of EvalResult for each metric
+        DeepEval metrics and heuristic metrics run in PARALLEL for speed.
         """
         if metrics is None:
             metrics = self._auto_select_metrics(expected, context, expected_tool_calls, conversation_history, trajectory_spec, rubrics, agent_type=agent_type)
 
         threshold = threshold or self.threshold
-        results = []
+
+        # Separate metrics into runnable lists after requirement checks
+        deepeval_jobs = []
+        heuristic_jobs = []
 
         for metric_id in metrics:
             if metric_id not in self.METRICS:
                 logger.warning(f"Unknown metric: {metric_id}")
                 continue
 
-            # Check requirements
             metric_info = self.METRICS[metric_id]
             if metric_info["requires"] == "context" and not context:
-                logger.debug(f"Skipping {metric_id}: requires context")
                 continue
             if metric_info["requires"] == "expected" and not expected:
-                logger.debug(f"Skipping {metric_id}: requires expected")
                 continue
             if metric_info["requires"] == "expected_tools" and not expected_tool_calls:
-                logger.debug(f"Skipping {metric_id}: requires expected_tool_calls")
                 continue
             if metric_info["requires"] == "conversation_history" and not conversation_history:
-                logger.debug(f"Skipping {metric_id}: requires conversation_history")
                 continue
             if metric_info["requires"] == "trajectory" and not (trajectory_spec or expected_tool_calls):
-                logger.debug(f"Skipping {metric_id}: requires trajectory or expected_tool_calls")
                 continue
             if metric_info["requires"] == "rubrics" and not rubrics:
-                logger.debug(f"Skipping {metric_id}: requires rubrics")
                 continue
 
-            # Run evaluation
-            result = self._run_metric(
+            if self._deepeval_available and metric_id in self.DEEPEVAL_ONLY_METRICS:
+                deepeval_jobs.append(metric_id)
+            else:
+                heuristic_jobs.append(metric_id)
+
+        # --- Run heuristic metrics instantly (fast, no LLM) ---
+        results = []
+        for metric_id in heuristic_jobs:
+            results.append(self._run_heuristic_metric(
                 metric_id, input_text, output, expected, context, threshold,
                 tool_calls=tool_calls,
                 expected_tool_calls=expected_tool_calls,
                 conversation_history=conversation_history,
                 trajectory_spec=trajectory_spec,
                 rubrics=rubrics,
-            )
-            results.append(result)
+            ))
+
+        # --- Run DeepEval metrics in PARALLEL (all share the same cached model) ---
+        if deepeval_jobs:
+            futures = {}
+            for metric_id in deepeval_jobs:
+                future = self._thread_pool.submit(
+                    self._run_deepeval_metric,
+                    metric_id, input_text, output, expected, context, threshold,
+                )
+                futures[metric_id] = future
+
+            for metric_id in deepeval_jobs:
+                try:
+                    result = futures[metric_id].result(timeout=120)
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"DeepEval parallel error for {metric_id}: {e}")
+                    results.append(self._run_heuristic_metric(
+                        metric_id, input_text, output, expected, context, threshold,
+                    ))
 
         return results
 
@@ -261,7 +300,11 @@ class Evaluator:
             metrics = ["answer_relevancy", "toxicity", "task_completion"]
 
         if context:
-            metrics.extend(["faithfulness", "hallucination"])
+            # Only add RAG metrics if context has substantial retrieval docs
+            # (skip if context is just a system prompt or single short sentence)
+            has_real_context = any(len(c.split()) > 20 for c in context)
+            if has_real_context:
+                metrics.extend(["faithfulness", "hallucination"])
 
         if expected:
             metrics.append("similarity")
@@ -295,10 +338,7 @@ class Evaluator:
         rubrics: Optional[List[str]] = None,
     ) -> EvalResult:
         """Run a single metric evaluation."""
-        if self._deepeval_available and metric_id in {
-            "answer_relevancy", "toxicity", "bias", "faithfulness",
-            "hallucination", "contextual_relevancy", "similarity",
-        }:
+        if self._deepeval_available and metric_id in self.DEEPEVAL_ONLY_METRICS:
             return self._run_deepeval_metric(
                 metric_id, input_text, output, expected, context, threshold
             )
@@ -321,17 +361,9 @@ class Evaluator:
         context: Optional[List[str]],
         threshold: float,
     ) -> EvalResult:
-        """Run evaluation using DeepEval."""
+        """Run evaluation using DeepEval with cached model (thread-safe)."""
         try:
             from deepeval.test_case import LLMTestCase
-            from deepeval.metrics import (
-                AnswerRelevancyMetric,
-                ToxicityMetric,
-                BiasMetric,
-                FaithfulnessMetric,
-                HallucinationMetric,
-                ContextualRelevancyMetric,
-            )
 
             # Build test case
             test_case = LLMTestCase(
@@ -341,18 +373,22 @@ class Evaluator:
                 retrieval_context=context,
             )
 
-            # Get appropriate metric
+            # Get metric (uses cached GPTModel + OAuth2 token)
             metric = self._get_deepeval_metric(metric_id, threshold)
             if metric is None:
                 return self._run_heuristic_metric(
                     metric_id, input_text, output, expected, context, threshold
                 )
 
-            # Run evaluation
+            # Run evaluation — already in a thread via _thread_pool
             metric.measure(test_case)
 
-            # Convert score to 0-100
-            score = metric.score * 100 if metric.score <= 1 else metric.score
+            # Convert score to 0-100.
+            raw = metric.score * 100 if metric.score <= 1 else metric.score
+            if metric_id in ("toxicity", "bias"):
+                score = 100.0 - raw
+            else:
+                score = raw
             passed = score >= threshold
 
             return EvalResult(
@@ -360,6 +396,7 @@ class Evaluator:
                 score=round(score, 1),
                 passed=passed,
                 reason=metric.reason or f"Score: {score:.1f}%",
+                scored_by="deepeval",
             )
 
         except Exception as e:
@@ -368,8 +405,85 @@ class Evaluator:
                 metric_id, input_text, output, expected, context, threshold
             )
 
+    @classmethod
+    def _get_oauth2_token(cls) -> Optional[str]:
+        """Get cached OAuth2 token, refreshing only when expired."""
+        now = time.time()
+        # Return cached token if still valid (with 60s buffer)
+        if cls._cached_token and now < cls._cached_token_expiry - 60:
+            return cls._cached_token
+
+        client_id = os.getenv("OAUTH_CLIENT_ID")
+        client_secret = os.getenv("OAUTH_CLIENT_SECRET")
+        tenant_id = os.getenv("OAUTH_TENANT_ID")
+        scope = os.getenv("OAUTH_SCOPE")
+        if not all([client_id, client_secret, tenant_id, scope]):
+            return None
+
+        try:
+            import requests as _req
+            token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            tok_resp = _req.post(token_url, data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": scope,
+            }, timeout=10)
+            tok_resp.raise_for_status()
+            token_data = tok_resp.json()
+            cls._cached_token = token_data["access_token"]
+            # Azure tokens typically expire in 3600s; use expires_in if available
+            cls._cached_token_expiry = now + token_data.get("expires_in", 3600)
+            logger.info("DeepEval: obtained/refreshed OAuth2 token for LLM Gateway")
+            return cls._cached_token
+        except Exception as tok_err:
+            logger.warning(f"DeepEval: OAuth2 token request failed: {tok_err}")
+            return cls._cached_token  # return stale token if refresh fails
+
+    @classmethod
+    def _get_cached_gpt_model(cls, model_name: str):
+        """Get cached GPTModel instance, creating only on first call or model change."""
+        if cls._cached_gpt_model and cls._cached_gpt_model_name == model_name:
+            # Refresh auth header if token was refreshed
+            token = cls._get_oauth2_token()
+            if token and hasattr(cls._cached_gpt_model, 'kwargs'):
+                headers = cls._cached_gpt_model.kwargs.get("default_headers", {})
+                if headers.get("Authorization") != f"Bearer {token}":
+                    headers["Authorization"] = f"Bearer {token}"
+            return cls._cached_gpt_model
+
+        gateway_key = os.getenv("LLM_GATEWAY_KEY")
+        gateway_url = os.getenv("LLM_GATEWAY_BASE_URL")
+        if not gateway_key or not gateway_url:
+            return model_name
+
+        try:
+            from deepeval.models import GPTModel
+
+            extra_headers = {}
+            token = cls._get_oauth2_token()
+            if token:
+                extra_headers["Authorization"] = f"Bearer {token}"
+                extra_headers["X-LLM-Gateway-Key"] = gateway_key
+
+            model_kwargs = {
+                "model": model_name,
+                "api_key": gateway_key,
+                "base_url": gateway_url,
+            }
+            if extra_headers:
+                model_kwargs["default_headers"] = extra_headers
+
+            cls._cached_gpt_model = GPTModel(**model_kwargs)
+            cls._cached_gpt_model_name = model_name
+            logger.debug(f"DeepEval: created cached GPTModel for {gateway_url}")
+            return cls._cached_gpt_model
+        except Exception as e:
+            logger.warning(f"GPTModel init failed: {e}")
+            return model_name
+
     def _get_deepeval_metric(self, metric_id: str, threshold: float) -> Any:
-        """Get the appropriate DeepEval metric instance."""
+        """Get the appropriate DeepEval metric instance with cached model."""
         try:
             from deepeval.metrics import (
                 AnswerRelevancyMetric,
@@ -381,23 +495,24 @@ class Evaluator:
             )
 
             threshold_decimal = threshold / 100
+            eval_model = self._get_cached_gpt_model(self.model)
 
             metrics_map = {
                 "answer_relevancy": AnswerRelevancyMetric(
-                    threshold=threshold_decimal, model=self.model
+                    threshold=threshold_decimal, model=eval_model
                 ),
                 "toxicity": ToxicityMetric(
-                    threshold=threshold_decimal, model=self.model
+                    threshold=threshold_decimal, model=eval_model
                 ),
-                "bias": BiasMetric(threshold=threshold_decimal, model=self.model),
+                "bias": BiasMetric(threshold=threshold_decimal, model=eval_model),
                 "faithfulness": FaithfulnessMetric(
-                    threshold=threshold_decimal, model=self.model
+                    threshold=threshold_decimal, model=eval_model
                 ),
                 "hallucination": HallucinationMetric(
-                    threshold=threshold_decimal, model=self.model
+                    threshold=threshold_decimal, model=eval_model
                 ),
                 "contextual_relevancy": ContextualRelevancyMetric(
-                    threshold=threshold_decimal, model=self.model
+                    threshold=threshold_decimal, model=eval_model
                 ),
             }
 
@@ -468,6 +583,13 @@ class Evaluator:
                 reason="Unknown metric",
             )
 
+    @staticmethod
+    def _tokenize_lower(text: str) -> List[str]:
+        """Tokenize text into lowercase alphanumeric word tokens."""
+        import re
+
+        return re.findall(r"[a-z0-9']+", (text or "").lower())
+
     def _heuristic_relevancy(
         self, input_text: str, output: str, threshold: float,
         expected: Optional[str] = None
@@ -521,15 +643,15 @@ class Evaluator:
                 'to', 'of', 'in', 'for', 'on', 'at', 'by', 'it', 'that', 'this',
                 'what', 'how', 'why', 'when', 'where', 'who', 'which', 'i', 'you',
             }
-            expected_words = set(expected.lower().split()) - stop_words
-            output_words = set(output_lower.split()) - stop_words
+            expected_words = set(self._tokenize_lower(expected)) - stop_words
+            output_words = set(self._tokenize_lower(output)) - stop_words
 
             if expected_words:
                 overlap = len(expected_words & output_words) / len(expected_words)
 
                 # Secondary signal: how well the response covers the input question topics
                 input_stop = stop_words | {'want', 'know', 'tell', 'please', 'give', 'show', 'find', 'plan', 'trip'}
-                input_words = set(input_text.lower().split()) - input_stop
+                input_words = set(self._tokenize_lower(input_text)) - input_stop
                 input_overlap = len(input_words & output_words) / max(len(input_words), 1) if input_words else 0
 
                 # Bonus for long substantive responses (≥50 words)
@@ -561,8 +683,8 @@ class Evaluator:
         stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'what', 'how',
                       'why', 'when', 'where', 'who', 'many', 'much', 'do', 'does',
                       'get', 'per', 'i', 'you', 'of', 'in', 'for', 'on', 'at'}
-        input_words = set(input_text.lower().split()) - stop_words
-        output_words = set(output_lower.split()) - stop_words
+        input_words = set(self._tokenize_lower(input_text)) - stop_words
+        output_words = set(self._tokenize_lower(output)) - stop_words
         overlap = len(input_words & output_words)
         relevancy = min(90.0, (overlap / max(len(input_words), 1)) * 100 + 40)
 
@@ -1093,11 +1215,11 @@ class Evaluator:
         if expected:
             expected_lower = expected.lower().strip()
             # Check if key terms from expected appear in output
-            expected_words = set(expected_lower.split()) - {
+            expected_words = set(self._tokenize_lower(expected_lower)) - {
                 'the', 'a', 'an', 'is', 'are', 'was', 'were', 'and', 'or', 'but',
                 'to', 'of', 'in', 'for', 'on', 'at', 'by', 'it', 'that', 'this',
             }
-            output_words = set(output_lower.split())
+            output_words = set(self._tokenize_lower(output_lower))
             if expected_words:
                 overlap = len(expected_words & output_words) / len(expected_words)
                 if overlap >= 0.5:
@@ -1151,11 +1273,11 @@ class Evaluator:
                 reason="Agent made no tool calls (expected {})".format(
                     ", ".join(t.get("name", "?") for t in expected_tool_calls)
                 ),
-                details={"expected": [t.get("name") for t in expected_tool_calls], "actual": []},
+                details={"expected": [t.get("name", t.get("tool")) for t in expected_tool_calls], "actual": []},
             )
 
-        expected_names = [t.get("name", "").lower() for t in expected_tool_calls]
-        actual_names = [t.get("name", "").lower() for t in tool_calls]
+        expected_names = [t.get("name", t.get("tool", "")).lower() for t in expected_tool_calls]
+        actual_names = [t.get("name", t.get("tool", "")).lower() for t in tool_calls]
 
         # Score = fraction of expected tools that were called
         matched = sum(1 for name in expected_names if name in actual_names)
@@ -1211,7 +1333,7 @@ class Evaluator:
         details_list = []
 
         for expected_tc in expected_tool_calls:
-            expected_name = expected_tc.get("name", "").lower()
+            expected_name = expected_tc.get("name", expected_tc.get("tool", "")).lower()
             expected_args = expected_tc.get("args", {})
 
             if not expected_args:
@@ -1220,7 +1342,7 @@ class Evaluator:
             # Find matching actual tool call
             actual_tc = None
             for tc in tool_calls:
-                if tc.get("name", "").lower() == expected_name:
+                if tc.get("name", tc.get("tool", "")).lower() == expected_name:
                     actual_tc = tc
                     break
 
@@ -1298,8 +1420,8 @@ class Evaluator:
                 reason="Agent made no tool calls to validate sequence",
             )
 
-        expected_names = [t.get("name", "").lower() for t in expected_tool_calls]
-        actual_names = [t.get("name", "").lower() for t in tool_calls]
+        expected_names = [t.get("name", t.get("tool", "")).lower() for t in expected_tool_calls]
+        actual_names = [t.get("name", t.get("tool", "")).lower() for t in tool_calls]
 
         if len(expected_names) <= 1:
             # Single tool — sequence doesn't matter, just check presence

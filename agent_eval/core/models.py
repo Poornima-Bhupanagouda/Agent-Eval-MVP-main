@@ -79,6 +79,7 @@ class EvalMetric:
     passed: bool
     reason: str
     details: Optional[dict] = None
+    scored_by: str = "heuristic"  # "deepeval" or "heuristic"
 
 
 @dataclass
@@ -115,7 +116,7 @@ class Result:
             "passed": self.passed,
             "latency_ms": self.latency_ms,
             "evaluations": [
-                {"metric": e.metric, "score": round(e.score, 1), "passed": e.passed, "reason": e.reason}
+                {"metric": e.metric, "score": round(e.score, 1), "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')}
                 for e in self.evaluations
             ],
             "created_at": self.created_at,

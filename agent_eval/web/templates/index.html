@@ -2419,6 +2419,11 @@
                                         </p>
                                     </div>
                                     <div class="flex gap-1">
+                                        <button class="btn btn-secondary btn-sm" onclick="warmupFleet()">Warm Up Fleet</button>
+                                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.78rem; color:var(--text-muted);">
+                                            <input type="checkbox" id="fleet-auto-warm-toggle" onchange="toggleFleetAutoWarm(this.checked)">
+                                            Auto warm on open
+                                        </label>
                                         <button class="btn btn-secondary btn-sm" onclick="document.querySelector('[data-tab=&quot;agents&quot;]').click()">View Fleet</button>
                                         <button class="btn btn-primary btn-sm" onclick="tryTravelOrchestrator()">Try Orchestrator</button>
                                     </div>
@@ -3295,6 +3300,7 @@
                         <input type="text" id="workflow-test-input" placeholder="Ask the orchestrator a question..." style="flex: 1;" onkeydown="if(event.key==='Enter')runWorkflowQuickTest()">
                         <button class="btn btn-primary btn-sm" onclick="runWorkflowQuickTest()">Send</button>
                     </div>
+                    <input type="text" id="workflow-test-expected" placeholder="Expected keywords (optional, e.g. weather, currency, landmarks)" style="width:100%;margin-top:0.4rem;font-size:0.82rem;">
                     <div id="workflow-test-result" style="margin-top: 0.5rem; display: none;"></div>
                 </div>
 
@@ -5215,25 +5221,109 @@
             // Store result ID for report download
             lastTestResultId = result.id;
 
-            // --- evaluations section ---
+            // --- Build per-metric rows + collect strengths / improvements ---
+            const strengths = [];
+            const improvements = [];
             let evalHtml = '';
-            if (result.evaluations && result.evaluations.length > 0) {
-                evalHtml = '<div class="eval-list" style="margin-top:0.75rem;">';
-                for (const e of result.evaluations) {
+            const evals = result.evaluations || [];
+
+            if (evals.length > 0) {
+                // Count engines
+                const deepevalCount = evals.filter(e => e.scored_by === 'deepeval').length;
+                const heuristicCount = evals.length - deepevalCount;
+                const engineSummary = [];
+                if (deepevalCount) engineSummary.push(`${deepevalCount} DeepEval (LLM)`);
+                if (heuristicCount) engineSummary.push(`${heuristicCount} Heuristic`);
+
+                evalHtml = `<div style="margin-top:0.75rem;">`;
+                evalHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">`;
+                evalHtml += `<span style="font-size:0.85rem;font-weight:700;">Metric Breakdown</span>`;
+                evalHtml += `<span style="font-size:0.7rem;color:var(--text-light);">${engineSummary.join(' · ')}</span>`;
+                evalHtml += `</div>`;
+
+                for (const e of evals) {
                     const scoreColor = e.score >= 70 ? '#16a34a' : e.score >= 40 ? '#ca8a04' : '#dc2626';
                     const borderColor = e.passed ? '#86efac' : '#fca5a5';
-                    evalHtml += `<div class="eval-item" style="border-left:3px solid ${borderColor};padding-left:0.6rem;margin-bottom:0.4rem;">`;
-                    evalHtml += `<span class="eval-icon ${e.passed ? 'eval-pass' : 'eval-fail'}">${e.passed ? '&#10003;' : '&#10007;'}</span>`;
-                    evalHtml += `<span class="eval-name">${formatMetricName(e.metric)}</span>`;
-                    evalHtml += `<span class="eval-score" style="color:${scoreColor};font-weight:600;">${typeof e.score === 'number' ? e.score.toFixed(1) : e.score}%</span>`;
+                    const bgColor = e.passed ? '#f0fdf420' : '#fef2f220';
+                    const engineLabel = e.scored_by === 'deepeval' ? 'DeepEval' : 'Heuristic';
+                    const engineColor = e.scored_by === 'deepeval' ? '#7c3aed' : '#9ca3af';
+                    const barWidth = Math.max(2, Math.min(100, e.score));
+
+                    evalHtml += `<div style="border-left:3px solid ${borderColor};padding:0.5rem 0.6rem;margin-bottom:0.4rem;background:${bgColor};border-radius:0 4px 4px 0;">`;
+                    evalHtml += `<div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">`;
+                    evalHtml += `<span style="font-size:0.9rem;">${e.passed ? '&#10003;' : '&#10007;'}</span>`;
+                    evalHtml += `<span style="font-weight:600;font-size:0.85rem;min-width:140px;">${formatMetricName(e.metric)}</span>`;
+                    evalHtml += `<span style="color:${scoreColor};font-weight:700;font-size:0.9rem;min-width:50px;">${typeof e.score === 'number' ? e.score.toFixed(1) : e.score}%</span>`;
+                    evalHtml += `<span style="font-size:0.6rem;padding:1px 6px;border-radius:8px;background:${engineColor}18;color:${engineColor};border:1px solid ${engineColor}40;font-weight:500;">${engineLabel}</span>`;
+                    evalHtml += `</div>`;
+                    // Score bar
+                    evalHtml += `<div style="margin-top:0.3rem;background:#e5e7eb;border-radius:3px;height:4px;width:100%;overflow:hidden;">`;
+                    evalHtml += `<div style="height:100%;width:${barWidth}%;background:${scoreColor};border-radius:3px;"></div>`;
+                    evalHtml += `</div>`;
                     if (e.reason) {
-                        evalHtml += `<span class="eval-reason" style="font-size:0.75rem;color:var(--text-light);margin-left:0.5rem;">${escapeHtml(e.reason)}</span>`;
+                        evalHtml += `<div style="font-size:0.75rem;color:var(--text-light);margin-top:0.25rem;">${escapeHtml(e.reason)}</div>`;
                     }
                     evalHtml += '</div>';
+
+                    // Collect strengths / improvements
+                    const label = formatMetricName(e.metric);
+                    if (e.passed && e.score >= 70) {
+                        strengths.push(`${label} (${e.score.toFixed(0)}%)`);
+                    } else {
+                        improvements.push({ label, score: e.score, reason: e.reason || '' });
+                    }
                 }
                 evalHtml += '</div>';
             } else {
                 evalHtml = '<p class="text-muted" style="font-size:0.8rem;margin-top:0.5rem;">No evaluations ran (check agent response and selected metrics).</p>';
+            }
+
+            // --- overall summary panel ---
+            let summaryHtml = '';
+            if (evals.length > 0) {
+                const passCount = evals.filter(e => e.passed).length;
+                const scoreVal = typeof result.score === 'number' ? result.score : 0;
+                const overallColor = scoreVal >= 70 ? '#16a34a' : scoreVal >= 40 ? '#ca8a04' : '#dc2626';
+
+                summaryHtml = `<div style="padding:0.75rem;border-radius:8px;background:${result.passed ? '#f0fdf4' : '#fef2f2'};border:1px solid ${result.passed ? '#86efac' : '#fca5a5'};margin-top:0.75rem;">`;
+                summaryHtml += `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">`;
+                summaryHtml += `<div style="font-size:0.85rem;font-weight:700;">Overall Assessment</div>`;
+                summaryHtml += `<div style="display:flex;gap:1rem;align-items:center;">`;
+                summaryHtml += `<span style="font-size:0.8rem;">Metrics: <strong>${passCount}/${evals.length} passed</strong></span>`;
+                summaryHtml += `<span style="font-size:1.1rem;font-weight:800;color:${overallColor};">${scoreVal.toFixed(1)}%</span>`;
+                summaryHtml += `</div></div>`;
+
+                // Strengths
+                if (strengths.length > 0) {
+                    summaryHtml += `<div style="margin-top:0.5rem;font-size:0.8rem;">`;
+                    summaryHtml += `<span style="color:#16a34a;font-weight:600;">&#9989; Strengths:</span> `;
+                    summaryHtml += strengths.join(', ');
+                    summaryHtml += `</div>`;
+                }
+                // Improvements needed
+                if (improvements.length > 0) {
+                    summaryHtml += `<div style="margin-top:0.3rem;font-size:0.8rem;">`;
+                    summaryHtml += `<span style="color:#dc2626;font-weight:600;">&#9888;&#65039; Needs Improvement:</span> `;
+                    summaryHtml += improvements.map(i => `${i.label} (${i.score.toFixed(0)}%)`).join(', ');
+                    summaryHtml += `</div>`;
+                    // Actionable tips for the worst metric
+                    const worst = improvements.sort((a,b) => a.score - b.score)[0];
+                    if (worst) {
+                        let tip = '';
+                        if (worst.label.includes('Relevancy'))  tip = 'The agent\'s answer may not directly address the question. Check the prompt and retrieval logic.';
+                        else if (worst.label.includes('Similarity')) tip = 'Agent output differs significantly from the expected answer. Review expected value or agent prompt rules.';
+                        else if (worst.label.includes('Toxicity')) tip = 'Response may contain inappropriate content. Review the agent\'s system prompt for safety guardrails.';
+                        else if (worst.label.includes('Hallucination')) tip = 'Agent may be generating facts not in the provided context. Restrict the LLM to only use retrieved context.';
+                        else if (worst.label.includes('Faithfulness')) tip = 'Agent response doesn\'t align with the provided context. Tighten the RAG prompt to stay grounded.';
+                        else if (worst.label.includes('Task')) tip = 'Agent may not be completing the requested task. Check for refusal patterns or incomplete answers.';
+                        else tip = `Focus on improving ${worst.label} — currently scoring ${worst.score.toFixed(0)}%.`;
+
+                        summaryHtml += `<div style="margin-top:0.4rem;padding:0.4rem 0.6rem;background:#fff7ed;border-left:3px solid #f59e0b;border-radius:0 4px 4px 0;font-size:0.78rem;color:#92400e;">`;
+                        summaryHtml += `&#128161; <strong>Tip:</strong> ${tip}`;
+                        summaryHtml += `</div>`;
+                    }
+                }
+                summaryHtml += `</div>`;
             }
 
             // --- trajectory section ---
@@ -5315,6 +5405,7 @@
                     </div>
 
                     ${expectedHtml}
+                    ${summaryHtml}
                     ${evalHtml}
                     ${trajectoryHtml}
                     ${rubricHtml}
@@ -6030,13 +6121,14 @@
                 // --- Metric chips ---
                 const evalsHtml = (r.evaluations || []).map(e => {
                     const score = typeof e.score === 'number' ? Math.round(e.score) : e.score;
-                    return `<span class="eval-chip ${e.passed ? 'pass' : 'fail'}" title="${escapeHtml(e.reason || '')}">${escapeHtml(formatMetricName(e.metric))}: ${score}%</span>`;
+                    const eng = e.scored_by === 'deepeval' ? ' [DeepEval]' : ' [Heuristic]';
+                    return `<span class="eval-chip ${e.passed ? 'pass' : 'fail'}" title="${escapeHtml(e.reason || '')}">${escapeHtml(formatMetricName(e.metric))}: ${score}%${eng}</span>`;
                 }).join('');
 
                 // --- Per-metric reasons ---
                 const reasonsHtml = (r.evaluations || []).filter(e => e.reason).map(e => `
                     <div style="margin-bottom:0.6rem; padding:0.5rem 0.75rem; background:var(--bg); border-radius:6px; border-left:3px solid ${e.passed ? 'var(--success)' : 'var(--danger)'};">
-                        <strong style="font-size:0.82rem;">${escapeHtml(formatMetricName(e.metric))} — ${Math.round(e.score)}%</strong>
+                        <strong style="font-size:0.82rem;">${escapeHtml(formatMetricName(e.metric))} — ${Math.round(e.score)}% <span style="font-size:0.7rem;color:${e.scored_by === 'deepeval' ? '#7c3aed' : '#9ca3af'}">(${e.scored_by === 'deepeval' ? 'DeepEval' : 'Heuristic'})</span></strong>
                         <div style="font-size:0.8rem; color:var(--text-light); margin-top:0.2rem;">${escapeHtml(e.reason)}</div>
                     </div>`).join('');
 
@@ -6252,6 +6344,42 @@
         let fleetData = null;
         let selectedWorkflowId = null;
         let selectedWorkflowData = null;
+        const FLEET_AUTOWARM_KEY = 'fleetAutoWarmEnabled';
+
+        function isFleetAutoWarmEnabled() {
+            return localStorage.getItem(FLEET_AUTOWARM_KEY) === '1';
+        }
+
+        function toggleFleetAutoWarm(enabled) {
+            localStorage.setItem(FLEET_AUTOWARM_KEY, enabled ? '1' : '0');
+            showToast(enabled ? 'Fleet auto-warm enabled' : 'Fleet auto-warm disabled', 'info');
+        }
+
+        function syncFleetAutoWarmUI() {
+            const el = document.getElementById('fleet-auto-warm-toggle');
+            if (el) el.checked = isFleetAutoWarmEnabled();
+        }
+
+        async function warmupFleet(silent = false) {
+            try {
+                const response = await fetch(`${API}/api/fleet/warmup?include_orchestrator=true`, { method: 'POST' });
+                const data = await response.json();
+                if (!silent) {
+                    showToast(`Fleet warm-up complete: ${data.healthy}/${data.requested} healthy`, 'success');
+                }
+            } catch (error) {
+                if (!silent) showToast('Fleet warm-up failed', 'error');
+            }
+            await loadFleetBanner();
+            await loadAgentsFleet();
+        }
+
+        async function autoWarmupFleetOnLoad() {
+            syncFleetAutoWarmUI();
+            if (isFleetAutoWarmEnabled()) {
+                await warmupFleet(true);
+            }
+        }
 
         async function loadFleetBanner() {
             try {
@@ -6261,7 +6389,7 @@
                 const healthyCount = fleetData.healthy || 0;
                 const totalCount = fleetData.total || 0;
 
-                if (healthyCount > 0) {
+                if (totalCount > 0) {
                     banner.style.display = 'block';
                     document.getElementById('fleet-healthy-count').textContent = healthyCount;
                     document.getElementById('fleet-total-count').textContent = totalCount;
@@ -6269,6 +6397,7 @@
                         `<span class="fleet-dot ${a.status === 'healthy' ? 'dot-healthy' : 'dot-offline'}" title="${a.name}: ${a.status}"></span>`
                     ).join('');
                     document.getElementById('fleet-status-dots').innerHTML = dotsHtml;
+                    syncFleetAutoWarmUI();
                 } else {
                     banner.style.display = 'none';
                 }
@@ -6691,6 +6820,7 @@
         async function runWorkflowQuickTest() {
             if (!selectedWorkflowId) return;
             const input = document.getElementById('workflow-test-input').value.trim();
+            const expected = document.getElementById('workflow-test-expected').value.trim() || null;
             const resultDiv = document.getElementById('workflow-test-result');
             if (!input) { showToast('Enter a question', 'error'); return; }
 
@@ -6698,10 +6828,12 @@
             resultDiv.innerHTML = '<span class="loading"></span> Sending to orchestrator...';
 
             try {
+                const payload = { input };
+                if (expected) payload.expected = expected;
                 const response = await fetch(`${API}/api/workflows/${selectedWorkflowId}/quick-test`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ input })
+                    body: JSON.stringify(payload)
                 });
                 if (!response.ok) {
                     const err = await response.json().catch(() => ({}));
@@ -6727,28 +6859,100 @@
                     for (const e of data.evaluations) {
                         const ec = e.passed ? '#f0fdf4' : '#fef2f2';
                         const tc = e.passed ? 'var(--success)' : 'var(--danger)';
-                        evalsHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:12px;background:${ec};color:${tc};border:1px solid ${tc};cursor:default;" title="${escapeHtml(e.reason || '')}">${formatMetricName(e.metric)}: ${e.score}%</span>`;
+                        evalsHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:12px;background:${ec};color:${tc};border:1px solid ${tc};cursor:default;" title="${escapeHtml(e.reason || '')}">${formatMetricName(e.metric)}: ${e.score}% ${e.scored_by === 'deepeval' ? '[D]' : '[H]'}</span>`;
                     }
                     evalsHtml += '</div>';
                 }
 
-                let toolCallsHtml = '';
+                // Tool routing section — rich validation display
+                let routingHtml = '';
+                const routing = data.tool_routing || {};
                 if (data.tool_calls && data.tool_calls.length > 0) {
-                    toolCallsHtml = `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--text-light);">
-                        🔧 Tool calls: ${data.tool_calls.map(tc => `<code>${escapeHtml(tc.name || tc.tool || JSON.stringify(tc))}</code>`).join(', ')}
-                    </div>`;
+                    const agentLabels = {
+                        'weather_agent': 'Weather Agent',
+                        'wiki_agent': 'Wiki Agent',
+                        'calculator_agent': 'Calculator Agent',
+                    };
+                    const agentIcons = {
+                        'weather_agent': '&#x1F324;&#xFE0F;',
+                        'wiki_agent': '&#x1F4DA;',
+                        'calculator_agent': '&#x1F522;',
+                    };
+
+                    // Build called agents badges
+                    const calledBadges = (routing.agents_called || []).map(aid => {
+                        const label = agentLabels[aid] || aid;
+                        const icon = agentIcons[aid] || '&#x2699;&#xFE0F;';
+                        return `<span style="font-size:0.72rem;padding:2px 8px;border-radius:12px;background:#f0fdf4;color:#16a34a;border:1px solid #86efac;">${icon} ${label} &#x2713;</span>`;
+                    });
+
+                    // Build missing agents badges (if any)
+                    const missingBadges = (routing.missing_agents || []).map(aid => {
+                        const label = agentLabels[aid] || aid;
+                        const icon = agentIcons[aid] || '&#x2699;&#xFE0F;';
+                        return `<span style="font-size:0.72rem;padding:2px 8px;border-radius:12px;background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;">${icon} ${label} &#x2717; missing</span>`;
+                    });
+
+                    // Build extra (unexpected) agents badges
+                    const extraBadges = (routing.extra_agents || []).map(aid => {
+                        const label = agentLabels[aid] || aid;
+                        return `<span style="font-size:0.72rem;padding:2px 8px;border-radius:12px;background:#fefce8;color:#ca8a04;border:1px solid #fde047;">&#x26A0; ${label} (unexpected)</span>`;
+                    });
+
+                    const routingStatus = routing.routing_correct
+                        ? '<span style="color:#16a34a;font-weight:600;">&#x2713; All expected agents called correctly</span>'
+                        : '<span style="color:#dc2626;font-weight:600;">&#x2717; Routing mismatch detected</span>';
+
+                    routingHtml = `
+                        <div style="margin-top:0.6rem;padding:0.5rem;background:var(--surface);border-radius:6px;border:1px solid var(--border);">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
+                                <span style="font-size:0.78rem;font-weight:700;">Agent Routing &amp; Tool Calls</span>
+                                <span style="font-size:0.72rem;">${routingStatus}</span>
+                            </div>
+                            <div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-bottom:0.3rem;">
+                                ${calledBadges.join('')}${missingBadges.join('')}${extraBadges.join('')}
+                            </div>
+                            <div style="font-size:0.7rem;color:var(--text-light);">
+                                Called: ${routing.count || 0}/${routing.expected_count || 0} expected agents
+                            </div>
+                        </div>`;
+                }
+
+                // Build the overall assessment summary
+                const evals = data.evaluations || [];
+                const passedMetrics = evals.filter(e => e.passed);
+                const failedMetrics = evals.filter(e => !e.passed);
+                const deepCount = evals.filter(e => e.scored_by === 'deepeval').length;
+                const heurCount = evals.length - deepCount;
+
+                let assessmentHtml = '';
+                if (evals.length > 0) {
+                    const strengths = passedMetrics.map(e => `${formatMetricName(e.metric)} (${e.score}%)`).join(', ');
+                    const weaknesses = failedMetrics.map(e => `${formatMetricName(e.metric)} (${e.score}%)`).join(', ');
+                    assessmentHtml = `
+                        <div style="margin-top:0.5rem;padding:0.5rem;background:var(--surface);border-radius:6px;font-size:0.78rem;">
+                            <div style="font-weight:600;margin-bottom:0.3rem;">Overall Assessment</div>
+                            <div>Metrics: ${passedMetrics.length}/${evals.length} passed</div>
+                            ${strengths ? `<div style="color:var(--success);">Strengths: ${strengths}</div>` : ''}
+                            ${weaknesses ? `<div style="color:var(--danger);">Needs Improvement: ${weaknesses}</div>` : ''}
+                            <div style="color:var(--text-light);margin-top:0.2rem;">${deepCount} DeepEval (LLM) · ${heurCount} Heuristic</div>
+                        </div>`;
                 }
 
                 resultDiv.innerHTML = `
                     <div style="background:var(--bg);padding:0.75rem;border-radius:6px;border:1px solid var(--border);font-size:0.85rem;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-                            <span style="color:${passColor};font-weight:700;font-size:0.82rem;">${passLabel}</span>
-                            <span style="color:${scoreColor};font-weight:600;font-size:0.82rem;">${data.score ?? 0}% relevancy</span>
-                            <span style="color:var(--text-light);font-size:0.75rem;">${data.latency_ms ?? 0}ms</span>
+                            <span style="color:${passColor};font-weight:700;font-size:0.9rem;">${passLabel}</span>
+                            <span style="font-weight:600;font-size:0.9rem;">Score: <span style="color:${scoreColor};">${data.score ?? 0}%</span></span>
+                            <span style="color:var(--text-light);font-size:0.75rem;">⏱ ${data.latency_ms ?? 0}ms</span>
                         </div>
-                        <div style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(output)}</div>
-                        ${toolCallsHtml}
+                        ${assessmentHtml}
                         ${evalsHtml}
+                        ${routingHtml}
+                        <details style="margin-top:0.5rem;">
+                            <summary style="cursor:pointer;font-size:0.75rem;color:var(--text-light);">Full Response (click to expand)</summary>
+                            <div style="white-space:pre-wrap;word-break:break-word;margin-top:0.3rem;padding:0.5rem;background:var(--surface);border-radius:4px;font-size:0.8rem;max-height:300px;overflow-y:auto;">${escapeHtml(output)}</div>
+                        </details>
                     </div>`;
             } catch (error) {
                 resultDiv.innerHTML = `<div style="background:#fee2e2;padding:0.75rem;border-radius:6px;color:var(--danger);font-size:0.85rem;">
@@ -8438,8 +8642,11 @@
         // Initialize
         loadMetrics();
         loadAnalyticsFilters();
-        loadFleetBanner();
-        loadAgentsFleet();  // Agents is now the default active tab
+        (async () => {
+            await autoWarmupFleetOnLoad();
+            await loadFleetBanner();
+            await loadAgentsFleet(); // Agents is now the default active tab
+        })();
         showTabIntros();
 
         // === Escape Key to Close Modals ===

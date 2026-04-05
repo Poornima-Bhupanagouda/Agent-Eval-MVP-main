@@ -87,9 +87,40 @@ def build_agent_input(original_input: str, agent_id: str) -> str:
         return f"Tell me about {location}"
 
     elif agent_id == "calculator_agent":
-        return f"Country info about {location}"
+        # The calculator agent needs a COUNTRY name (not city).
+        # Map well-known cities to their countries.
+        country = _city_to_country(location)
+        return f"Country info {country}"
 
     return f"Tell me about {location}"
+
+
+# Common city → country mapping for the calculator agent
+_CITY_COUNTRY_MAP = {
+    "tokyo": "Japan", "kyoto": "Japan", "osaka": "Japan",
+    "paris": "France", "lyon": "France", "marseille": "France",
+    "london": "United Kingdom", "manchester": "United Kingdom", "edinburgh": "United Kingdom",
+    "berlin": "Germany", "munich": "Germany", "frankfurt": "Germany",
+    "rome": "Italy", "milan": "Italy", "venice": "Italy", "florence": "Italy",
+    "madrid": "Spain", "barcelona": "Spain",
+    "new york": "United States", "los angeles": "United States", "chicago": "United States",
+    "san francisco": "United States", "washington": "United States", "miami": "United States",
+    "sydney": "Australia", "melbourne": "Australia",
+    "toronto": "Canada", "vancouver": "Canada", "montreal": "Canada",
+    "beijing": "China", "shanghai": "China",
+    "mumbai": "India", "delhi": "India", "new delhi": "India", "bangalore": "India",
+    "dubai": "United Arab Emirates", "abu dhabi": "United Arab Emirates",
+    "bangkok": "Thailand", "singapore": "Singapore", "seoul": "South Korea",
+    "cairo": "Egypt", "istanbul": "Turkey", "moscow": "Russia",
+    "rio de janeiro": "Brazil", "sao paulo": "Brazil",
+    "amsterdam": "Netherlands", "lisbon": "Portugal", "vienna": "Austria",
+    "zurich": "Switzerland", "geneva": "Switzerland", "prague": "Czech Republic",
+    "budapest": "Hungary", "warsaw": "Poland", "athens": "Greece",
+}
+
+def _city_to_country(location: str) -> str:
+    """Convert a city name to country, or return as-is if already a country."""
+    return _CITY_COUNTRY_MAP.get(location.lower().strip(), location)
 
 
 def extract_subject(text: str) -> str:
@@ -222,16 +253,15 @@ def synthesize_responses(query: str, agent_results: List[Dict[str, Any]]) -> str
         if result["success"]:
             sections.append(result["output"])
         else:
-            sections.append(f"[{result['agent_name']} unavailable: {result.get('error', 'unknown error')}]")
+            # Show a clean user-friendly message, not raw error details
+            sections.append(f"[{result['agent_name']} data temporarily unavailable]")
 
-    # Summary
+    # Summary (only show useful info, not internal stats)
     successful = [r for r in agent_results if r["success"]]
     failed = [r for r in agent_results if not r["success"]]
-    total_latency = sum(r["latency_ms"] for r in agent_results)
 
-    sections.append(f"\n--- Summary ---")
-    sections.append(f"Agents consulted: {len(agent_results)} ({len(successful)} successful, {len(failed)} failed)")
-    sections.append(f"Total processing time: {total_latency}ms")
+    if failed:
+        sections.append(f"\nNote: {len(failed)} data source(s) were temporarily unavailable.")
 
     return "\n".join(sections)
 

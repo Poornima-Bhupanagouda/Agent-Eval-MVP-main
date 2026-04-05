@@ -6,6 +6,7 @@ Simple async HTTP client with automatic format detection.
 
 import httpx
 import time
+import uuid
 import asyncio
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
@@ -64,6 +65,9 @@ class Executor:
             ExecutionResult with output and metadata
         """
         start = time.time()
+
+        # Sanitize endpoint URL (strip tabs, spaces, newlines from copy-paste)
+        endpoint = endpoint.strip().replace("\t", "").replace("\n", "").replace("\r", "").replace(" ", "")
 
         # Default headers
         request_headers = {"Content-Type": "application/json"}
@@ -301,6 +305,7 @@ class Executor:
     ) -> List[ExecutionResult]:
         """
         Execute a multi-turn conversation, maintaining history across turns.
+        Uses a shared session_id so agents can maintain server-side state.
 
         Args:
             endpoint: The agent's HTTP endpoint URL
@@ -317,6 +322,7 @@ class Executor:
 
         conversation_history = []
         results = []
+        session_id = str(uuid.uuid4())  # shared across all turns
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for turn in turns:
@@ -335,7 +341,7 @@ class Executor:
 
                 # Try conversation-aware payload formats
                 payloads = self._get_conversation_payloads(
-                    user_content, conversation_history, context
+                    user_content, conversation_history, context, session_id
                 )
 
                 result = None
@@ -416,21 +422,25 @@ class Executor:
         current_input: str,
         history: List[Dict],
         context: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
     ) -> List[dict]:
         """Generate conversation-aware payload formats."""
+        sid = {"session_id": session_id} if session_id else {}
         payloads = [
-            # OpenAI-compatible (most common for conversational agents)
-            {"messages": history},
+            # Platform format with session (best for stateful agents)
+            {"input": current_input, "conversation_history": history, **sid},
+            # OpenAI-compatible with session
+            {"messages": history, **sid},
             # OpenAI with context
-            *([{"messages": history, "context": context}] if context else []),
+            *([{"messages": history, "context": context, **sid}] if context else []),
             # Generic with history
-            {"input": current_input, "history": history},
-            {"message": current_input, "conversation_history": history},
-            {"query": current_input, "messages": history},
+            {"input": current_input, "history": history, **sid},
+            {"message": current_input, "conversation_history": history, **sid},
+            {"query": current_input, "messages": history, **sid},
             # With context
-            *([{"input": current_input, "history": history, "context": context}] if context else []),
+            *([{"input": current_input, "history": history, "context": context, **sid}] if context else []),
             # Simple fallback (no history)
-            {"input": current_input},
+            {"input": current_input, **sid},
             {"message": current_input},
         ]
         return payloads
@@ -447,6 +457,10 @@ class Executor:
             Dict with 'success', 'latency_ms', and optional 'error'
         """
         start = time.time()
+
+        # Sanitize endpoint URL (strip tabs, spaces, newlines from copy-paste)
+        endpoint = endpoint.strip().replace("\t", "").replace("\n", "").replace("\r", "").replace(" ", "")
+
         request_headers = {}
         if headers:
             request_headers.update(headers)

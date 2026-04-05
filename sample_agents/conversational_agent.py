@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _sessions: Dict[str, Dict] = defaultdict(lambda: {"history": [], "context": {}})
 
+# Cached OAuth2 token for LLM Gateway (avoid re-fetching every turn)
+_cached_token: Optional[str] = None
+_cached_token_expiry: float = 0
+
 
 # ---------------------------------------------------------------------------
 # Demo-mode response engine
@@ -76,6 +80,8 @@ def _extract_context_facts(history: List[Dict]) -> Dict[str, Any]:
             (["paris", "france", "europe", "travel", "trip", "visit"], "travel to Paris"),
             (["python", "code", "programming", "software", "developer"], "programming"),
             (["health", "diet", "exercise", "fitness", "nutrition"], "health and fitness"),
+            (["food", "vegetarian", "vegan", "dinner", "lunch", "meal", "cuisine", "recipe"], "food preferences"),
+            (["coffee", "tea", "drink", "beverage", "latte", "cappuccino", "espresso", "mocha"], "drink preferences"),
             (["machine learning", "ai", "artificial intelligence", "model", "neural"], "AI and machine learning"),
             (["work", "job", "career", "office", "manager", "project"], "work"),
             (["book", "read", "novel", "story", "author"], "reading"),
@@ -84,8 +90,8 @@ def _extract_context_facts(history: List[Dict]) -> Dict[str, Any]:
                 topics.append(kw_group[1])
 
         # Preference detection
-        if "i like" in content or "i love" in content or "i enjoy" in content:
-            m = re.search(r"i (?:like|love|enjoy) ([^.!?]+)", content)
+        if "i like" in content or "i love" in content or "i enjoy" in content or "i prefer" in content:
+            m = re.search(r"i (?:like|love|enjoy|prefer) ([^.!?]+)", content)
             if m:
                 facts["preference"] = m.group(1).strip()
 
@@ -128,7 +134,7 @@ def _build_demo_response(user_input: str, history: List[Dict]) -> str:
     # --- Direct memory questions ---
     if any(q in lower for q in ["what is my name", "what's my name", "do you remember my name", "who am i"]):
         if facts.get("name"):
-            return f"Of course! Your name is {facts['name']}. I remember everything you've shared with me."
+            return f"Of course! Your name is {facts['name']}. I remember what you've shared so far."
         return "You haven't told me your name yet. What should I call you?"
 
     if any(q in lower for q in ["what did i say", "what did we talk", "do you remember", "what was i asking"]):
@@ -142,6 +148,17 @@ def _build_demo_response(user_input: str, history: List[Dict]) -> str:
             f"We've had {turn} exchange(s) so far. "
             "I'm tracking our full conversation — what would you like to revisit?"
         )
+
+    # --- Drink / preference recall ---
+    if any(q in lower for q in ["what drink", "which drink", "what beverage"]):
+        pref = facts.get("preference", "")
+        if "coffee" in pref:
+            return f"{name_prefix}You told me you like coffee! You mentioned: '{facts['preference']}'."
+        if "tea" in pref:
+            return f"{name_prefix}You told me you like tea! You mentioned: '{facts['preference']}'."
+        if pref:
+            return f"{name_prefix}Based on what you've shared, your preference is: {pref}."
+        return f"{name_prefix}You haven't told me about your drink preferences yet."
 
     if any(q in lower for q in ["what do i like", "what are my preferences", "what do you know about me"]):
         details = []
@@ -157,6 +174,26 @@ def _build_demo_response(user_input: str, history: List[Dict]) -> str:
             return f"Here's what I know about you: {'; '.join(details)}."
         return "You haven't shared much personal information yet. Tell me more about yourself!"
 
+    # --- Name introduction ---
+    if re.search(r"my name is ([a-z]+)", lower) or re.search(r"i'?m ([a-z]+)\b", lower) or re.search(r"call me ([a-z]+)", lower):
+        name = facts.get("name", "there")
+        pref_note = ""
+        if facts.get("preference"):
+            pref_note = f" I'll also remember that you {facts['preference']}."
+        return (
+            f"Nice to meet you, {name}! I'll remember your name throughout our conversation.{pref_note} "
+            f"How can I help you today?"
+        )
+
+    # --- Preference statements ("I like X") ---
+    if re.search(r"i (?:like|love|enjoy|prefer) ", lower):
+        pref = facts.get("preference", "")
+        if pref:
+            return (
+                f"{name_prefix}Got it! I'll remember that you {pref}. "
+                f"Feel free to ask me anything related to that, or share more about your preferences!"
+            )
+
     # --- Greetings ---
     if re.match(r"^(hello|hi|hey|good morning|good afternoon|good evening)[!.,]?$", lower):
         if facts.get("name"):
@@ -166,7 +203,7 @@ def _build_demo_response(user_input: str, history: List[Dict]) -> str:
             )
         return (
             "Hello! I'm your conversational assistant. "
-            "I remember everything shared in our session. "
+            "I remember what you've shared in this session. "
             "What's your name, and how can I help you today?"
         )
 
@@ -239,6 +276,41 @@ def _build_demo_response(user_input: str, history: List[Dict]) -> str:
             "patterns from data rather than following explicit rules. Is there a specific area you'd like to explore?"
         )
 
+    # --- Coffee / tea / drink suggestions ---
+    if any(kw in lower for kw in ["coffee", "latte", "cappuccino", "espresso", "mocha", "americano"]):
+        return (
+            f"{name_prefix}Here are some great coffee drinks for you: "
+            "Cappuccino (frothy and creamy), Caramel Latte (sweet and smooth), "
+            "Espresso (bold and intense), Mocha (chocolate meets coffee), "
+            "or a classic Americano. Would you like to know more about any of these?"
+        )
+
+    if any(kw in lower for kw in ["tea", "chai", "matcha", "herbal tea", "green tea"]):
+        return (
+            f"{name_prefix}Here are some wonderful tea options: "
+            "Masala Chai (spiced and warming), Matcha Latte (earthy and energizing), "
+            "Earl Grey (classic and aromatic), Chamomile (calming), "
+            "or Green Tea (light and refreshing). Which sounds good?"
+        )
+
+    # --- Food / dietary / recommendation queries ---
+    if any(kw in lower for kw in ["food", "dinner", "lunch", "breakfast", "meal", "eat", "restaurant",
+                                    "vegetarian", "vegan", "recipe", "dish", "cuisine"]):
+        pref = facts.get("preference", "")
+        is_veg = "vegetarian" in pref or "vegetarian" in lower or "vegan" in lower
+        if is_veg:
+            return (
+                f"{name_prefix}Since you prefer vegetarian food, here are some great dinner options: "
+                "Paneer Tikka Masala, Mushroom Risotto, Vegetable Pad Thai, "
+                "Margherita Pizza, or a hearty Lentil Soup. "
+                "Would you like a recipe for any of these?"
+            )
+        return (
+            f"{name_prefix}Here are some dinner suggestions: Grilled Chicken with roasted vegetables, "
+            "Pasta Carbonara, Stir-fry with tofu or shrimp, a fresh Caesar Salad, "
+            "or a classic Margherita Pizza. Would you like more details on any of these?"
+        )
+
     if any(kw in lower for kw in ["explain", "what is", "how does", "tell me about"]):
         topic_match = re.search(r"(?:explain|what is|how does|tell me about)\s+(.+)", lower)
         topic = topic_match.group(1).strip().rstrip("?") if topic_match else "that topic"
@@ -278,29 +350,83 @@ def _build_demo_response(user_input: str, history: List[Dict]) -> str:
 
 async def _live_response(user_input: str, history: List[Dict]) -> Optional[str]:
     """
-    Try to get a real LLM response if OPENAI_API_KEY is configured.
-    Returns None if unavailable so caller falls back to demo mode.
+    Try to get a real LLM response using LLM Gateway (with OAuth2)
+    or direct OpenAI API. Returns None if unavailable so caller falls
+    back to demo mode.
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
+    global _cached_token, _cached_token_expiry
+
+    # Prefer LLM Gateway (corporate setup with OAuth2)
+    gateway_key = os.getenv("LLM_GATEWAY_KEY") or os.getenv("LLM_MODEL_API_KEY")
+    gateway_url = os.getenv("LLM_GATEWAY_BASE_URL") or os.getenv("LLM_MODEL_BASE_URL")
+    model_name = os.getenv("DEPLOYMENT_MODEL") or os.getenv("LLM_MODEL_NAME") or "gpt-4o-mini"
+
+    if not gateway_key or not gateway_url:
+        # Fallback: try direct OpenAI
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key or api_key.startswith("sk-your-"):
+            return None
+        gateway_key = api_key
+        gateway_url = "https://api.openai.com/v1"
+        model_name = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+
     try:
         import httpx
+
         messages = [
             {"role": "system", "content": (
                 "You are a helpful conversational assistant with perfect memory. "
-                "Always reference relevant things the user has told you earlier in the conversation."
+                "Always reference relevant things the user has told you earlier in the conversation. "
+                "Keep answers concise and directly relevant to the question."
             )}
         ] + history + [{"role": "user", "content": user_input}]
 
+        headers = {
+            "Content-Type": "application/json",
+            "X-LLM-Gateway-Key": gateway_key,
+        }
+
+        # Get OAuth2 token (cached — only refresh when expired)
+        client_id = os.getenv("OAUTH_CLIENT_ID")
+        client_secret = os.getenv("OAUTH_CLIENT_SECRET")
+        tenant_id = os.getenv("OAUTH_TENANT_ID")
+        scope = os.getenv("OAUTH_SCOPE")
+        if all([client_id, client_secret, tenant_id, scope]):
+            import time as _time
+            now = _time.time()
+            if _cached_token and now < _cached_token_expiry - 60:
+                headers["Authorization"] = f"Bearer {_cached_token}"
+            else:
+                try:
+                    token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+                    async with httpx.AsyncClient(timeout=10.0) as tc:
+                        tok_resp = await tc.post(token_url, data={
+                            "grant_type": "client_credentials",
+                            "client_id": client_id,
+                            "client_secret": client_secret,
+                            "scope": scope,
+                        })
+                        tok_resp.raise_for_status()
+                        tok_data = tok_resp.json()
+                        _cached_token = tok_data["access_token"]
+                        _cached_token_expiry = now + tok_data.get("expires_in", 3600)
+                        headers["Authorization"] = f"Bearer {_cached_token}"
+                except Exception as tok_err:
+                    logger.warning(f"OAuth2 token request failed: {tok_err}")
+                    if _cached_token:
+                        headers["Authorization"] = f"Bearer {_cached_token}"
+
+        chat_url = f"{gateway_url.rstrip('/')}/chat/completions"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={"model": "gpt-4o-mini", "messages": messages, "max_tokens": 500},
+                chat_url,
+                headers=headers,
+                json={"model": model_name, "messages": messages, "max_tokens": 500},
             )
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
+            else:
+                logger.warning(f"LLM call returned {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         logger.warning(f"Live LLM call failed, falling back to demo: {e}")
     return None

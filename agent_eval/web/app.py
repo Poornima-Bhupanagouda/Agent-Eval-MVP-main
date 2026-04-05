@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI web application for Lilly Agent Eval.
 
 Simple, clean API with minimal routes.
@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Tuple
 import base64
 import os
+import asyncio
+import subprocess
+import sys
 import logging
 from pathlib import Path
 import json
@@ -19,6 +22,7 @@ import csv
 import io
 import yaml
 from datetime import datetime
+from urllib.parse import urlparse
 
 from agent_eval.core.evaluator import Evaluator, EvalResult
 from agent_eval.core.executor import Executor
@@ -65,6 +69,134 @@ STANDALONE_AGENTS = [
     {"name": "Calculator Agent",     "endpoint": "http://127.0.0.1:8006/chat", "port": 8006, "health_path": "/", "tags": ["demo", "tool_using"]},
     {"name": "Travel Orchestrator",  "endpoint": "http://127.0.0.1:8010/chat", "port": 8010, "health_path": "/", "tags": ["demo", "orchestrator"]},
 ]
+
+# Local demo agent launch map for automatic startup on demand.
+DEMO_AGENT_STARTUP = {
+    8002: {"module": "sample_agents.smart_rag_agent", "depends_on": []},
+    8003: {"module": "sample_agents.conversational_agent", "depends_on": []},
+    8004: {"module": "sample_agents.weather_agent", "depends_on": []},
+    8005: {"module": "sample_agents.wiki_agent", "depends_on": []},
+    8006: {"module": "sample_agents.calculator_agent", "depends_on": []},
+    8010: {"module": "sample_agents.travel_orchestrator", "depends_on": [8004, 8005, 8006]},
+}
+
+_demo_agent_processes: Dict[int, subprocess.Popen] = {}
+_demo_start_lock = asyncio.Lock()
+
+
+async def _is_agent_port_healthy(port: int, timeout: float = 1.5) -> bool:
+    """Check whether a localhost demo agent is responding on /health or /."""
+    import urllib.error
+    import urllib.request
+
+    base = f"http://127.0.0.1:{port}"
+
+    def _probe(url: str) -> bool:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                return resp.status == 200
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return False
+
+    for path in ("/health", "/"):
+        if await asyncio.to_thread(_probe, f"{base}{path}"):
+            return True
+
+    return False
+
+
+def _start_demo_agent_process(port: int) -> bool:
+    """Start a demo agent process for a known port if not already running."""
+    spec = DEMO_AGENT_STARTUP.get(port)
+    if not spec:
+        return False
+
+    existing = _demo_agent_processes.get(port)
+    if existing and existing.poll() is None:
+        return True
+
+    project_root = Path(__file__).parent.parent.parent
+    cmd = [sys.executable, "-m", spec["module"]]
+    popen_kwargs = {
+        "cwd": str(project_root),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        _demo_agent_processes[port] = subprocess.Popen(cmd, **popen_kwargs)
+        logger.info(f"Auto-started demo agent on port {port}: {spec['module']}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to auto-start demo agent on port {port}: {e}")
+        return False
+
+
+async def _wait_until_healthy(port: int, timeout_seconds: float = 18.0) -> bool:
+    """Wait until the agent on the given port becomes healthy."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if await _is_agent_port_healthy(port):
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
+async def _ensure_demo_agents_running_for_endpoint(endpoint: str) -> None:
+    """Auto-start known local demo agents when requests target their endpoints."""
+    try:
+        parsed = urlparse(endpoint)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except Exception:
+        return
+
+    if host not in {"127.0.0.1", "localhost"} or port not in DEMO_AGENT_STARTUP:
+        return
+
+    if await _is_agent_port_healthy(port):
+        return
+
+    async with _demo_start_lock:
+        if await _is_agent_port_healthy(port):
+            return
+
+        to_start = DEMO_AGENT_STARTUP[port]["depends_on"] + [port]
+        for dep_port in to_start:
+            if await _is_agent_port_healthy(dep_port):
+                continue
+            if not _start_demo_agent_process(dep_port):
+                continue
+            became_healthy = await _wait_until_healthy(dep_port)
+            if not became_healthy:
+                logger.warning(f"Demo agent on port {dep_port} did not become healthy in time")
+
+
+async def _execute_with_autostart(
+    endpoint: str,
+    input_text: str,
+    headers: Optional[Dict[str, str]] = None,
+    context: Optional[List[str]] = None,
+):
+    """Execute a request and auto-start local demo agents when needed."""
+    await _ensure_demo_agents_running_for_endpoint(endpoint)
+    return await executor.execute(endpoint, input_text, headers=headers, context=context)
+
+
+async def _execute_conversation_with_autostart(
+    endpoint: str,
+    turns: List[Dict[str, str]],
+    headers: Optional[Dict[str, str]] = None,
+    context: Optional[List[str]] = None,
+):
+    """Execute conversation and auto-start local demo agents when needed."""
+    await _ensure_demo_agents_running_for_endpoint(endpoint)
+    return await executor.execute_conversation(endpoint, turns, headers=headers, context=context)
 
 
 @app.on_event("startup")
@@ -332,7 +464,7 @@ async def home():
     """Serve the single-page application."""
     template_path = Path(__file__).parent / "templates" / "index.html"
     if template_path.exists():
-        return HTMLResponse(template_path.read_text())
+        return HTMLResponse(template_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Lilly Agent Eval</h1><p>Template not found</p>")
 
 
@@ -359,7 +491,7 @@ async def run_test(request: QuickTestRequest):
         headers = _resolve_auth_headers(auth=request.auth, endpoint=request.endpoint)
 
         # Execute agent call (pass context for RAG agents)
-        exec_result = await executor.execute(
+        exec_result = await _execute_with_autostart(
             request.endpoint,
             request.input,
             headers=headers,
@@ -369,8 +501,9 @@ async def run_test(request: QuickTestRequest):
         if exec_result.error:
             raise HTTPException(status_code=400, detail=exec_result.error)
 
-        # Run evaluations
-        eval_results = evaluator.evaluate(
+        # Run evaluations (in thread to avoid blocking event loop during DeepEval LLM calls)
+        eval_results = await asyncio.to_thread(
+            evaluator.evaluate,
             input_text=request.input,
             output=exec_result.output,
             expected=request.expected,
@@ -403,6 +536,7 @@ async def run_test(request: QuickTestRequest):
                     score=r.score,
                     passed=r.passed,
                     reason=r.reason,
+                    scored_by=getattr(r, 'scored_by', 'heuristic'),
                 )
                 for r in eval_results
             ],
@@ -419,7 +553,7 @@ async def run_test(request: QuickTestRequest):
             latency_ms=exec_result.latency_ms,
             expected=request.expected,
             evaluations=[
-                {"metric": r.metric, "score": round(r.score, 1), "passed": r.passed, "reason": r.reason}
+                {"metric": r.metric, "score": round(r.score, 1), "passed": r.passed, "reason": r.reason, "scored_by": getattr(r, 'scored_by', 'heuristic')}
                 for r in eval_results
             ],
         )
@@ -799,7 +933,7 @@ async def run_suite(suite_id: str, endpoint: Optional[str] = None, threshold: Op
         async def run_single_test(test):
             async with semaphore:
                 try:
-                    exec_result = await executor.execute(target_endpoint, test.input, headers=headers)
+                    exec_result = await _execute_with_autostart(target_endpoint, test.input, headers=headers)
 
                     if exec_result.error:
                         return {
@@ -808,7 +942,8 @@ async def run_suite(suite_id: str, endpoint: Optional[str] = None, threshold: Op
                             "error": exec_result.error,
                         }
 
-                    eval_results = evaluator.evaluate(
+                    eval_results = await asyncio.to_thread(
+                        evaluator.evaluate,
                         input_text=test.input,
                         output=exec_result.output,
                         expected=test.expected,
@@ -831,7 +966,7 @@ async def run_suite(suite_id: str, endpoint: Optional[str] = None, threshold: Op
                         passed=all_passed,
                         latency_ms=exec_result.latency_ms,
                         evaluations=[
-                            EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason)
+                            EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic'))
                             for r in eval_results
                         ],
                     )
@@ -900,7 +1035,7 @@ async def run_batch(request: BatchRequest):
 
         for test_data in request.tests:
             # Execute (pass context for RAG agents)
-            exec_result = await executor.execute(
+            exec_result = await _execute_with_autostart(
                 request.endpoint,
                 test_data.input,
                 headers=headers,
@@ -915,7 +1050,8 @@ async def run_batch(request: BatchRequest):
                 continue
 
             # Evaluate
-            eval_results = evaluator.evaluate(
+            eval_results = await asyncio.to_thread(
+                evaluator.evaluate,
                 input_text=test_data.input,
                 output=exec_result.output,
                 expected=test_data.expected,
@@ -941,7 +1077,7 @@ async def run_batch(request: BatchRequest):
                 passed=all_passed,
                 latency_ms=exec_result.latency_ms,
                 evaluations=[
-                    EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason)
+                    EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic'))
                     for r in eval_results
                 ],
             )
@@ -1223,7 +1359,7 @@ async def generate_html_report(request: ReportRequest):
                     if isinstance(e, dict):
                         evals.append(e)
                     else:
-                        evals.append({"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason})
+                        evals.append({"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')})
 
                 r_dict = {
                     "input": r.input,
@@ -1306,7 +1442,7 @@ async def generate_json_report(request: ReportRequest):
                 if isinstance(e, dict):
                     evals.append(e)
                 else:
-                    evals.append({"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason})
+                    evals.append({"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')})
 
             r_dict = {
                 "input": r.input,
@@ -1693,7 +1829,7 @@ async def quick_test_registered_agent(agent_id: str, input: str):
         headers = auth_req.to_headers()
 
     # Execute test
-    response = await executor.execute(
+    response = await _execute_with_autostart(
         endpoint=agent.endpoint,
         input_text=input,
         headers=headers,
@@ -1954,7 +2090,7 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
             trajectory_stats["tests_with_trajectory"] += 1
 
         try:
-            exec_result = await executor.execute(endpoint, test_input)
+            exec_result = await _execute_with_autostart(endpoint, test_input)
 
             if exec_result.error:
                 results.append({
@@ -1969,7 +2105,8 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
                 })
                 continue
 
-            eval_results = evaluator.evaluate(
+            eval_results = await asyncio.to_thread(
+                evaluator.evaluate,
                 input_text=test_input,
                 output=exec_result.output,
                 expected=expected,
@@ -1987,7 +2124,7 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
                 passed_count += 1
             total_score += avg_score
 
-            evals_list = [{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason} for r in eval_results]
+            evals_list = [{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason, "scored_by": getattr(r, 'scored_by', 'heuristic')} for r in eval_results]
             all_eval_results.append({"passed": all_passed, "latency_ms": exec_result.latency_ms, "evaluations": evals_list})
 
             trajectory_result = None
@@ -2009,7 +2146,7 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
                 score=avg_score,
                 passed=all_passed,
                 latency_ms=exec_result.latency_ms,
-                evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason) for r in eval_results],
+                evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic')) for r in eval_results],
                 trajectory_result=trajectory_result,
                 rubric_results=rubric_results,
             )
@@ -2083,22 +2220,80 @@ async def workflow_quick_test(workflow_id: str, req: Request):
         raise HTTPException(status_code=404, detail="Workflow not found")
 
     input_text = body.get("input", "")
+    expected_text = body.get("expected") or None
     if not input_text:
         raise HTTPException(status_code=400, detail="Input is required")
 
     try:
-        exec_result = await executor.execute(workflow.orchestrator.endpoint, input_text)
+        exec_result = await _execute_with_autostart(workflow.orchestrator.endpoint, input_text)
         if exec_result.error:
             return {"output": None, "latency_ms": exec_result.latency_ms, "error": exec_result.error, "tool_calls": []}
 
-        # Run a quick relevancy evaluation so the quick test is meaningful
-        eval_results = evaluator.evaluate(
+        # ── Auto-derive expected_tool_calls from workflow sub-agents ──
+        # Map endpoint → agent_id from actual tool_calls so we can build expected list
+        endpoint_to_agent = {}
+        for tc in (exec_result.tool_calls or []):
+            agent_id = tc.get("args", {}).get("agent", "")
+            endpoint = tc.get("args", {}).get("endpoint", "")
+            if agent_id and endpoint:
+                endpoint_to_agent[endpoint] = agent_id
+
+        # Build expected_tool_calls from all sub-agents in the workflow definition
+        expected_tool_calls = []
+        for sa in workflow.sub_agents:
+            # Try to resolve agent_id from endpoint, or derive from agent name
+            agent_id = endpoint_to_agent.get(sa.endpoint) or sa.name.lower().replace(" ", "_")
+            expected_tool_calls.append({"tool": "route_to_agent", "args": {"agent": agent_id}})
+
+        # Build trajectory spec (ANY_ORDER — orchestrator can call agents in any order)
+        trajectory_spec = {
+            "match_type": "ANY_ORDER",
+            "expected_calls": expected_tool_calls,
+            "check_args": False,
+        }
+
+        # ── Run comprehensive evaluation with tool metrics ──
+        eval_metrics_list = [
+            "answer_relevancy",   # Does the response answer the query?
+            "task_completion",    # Did the agent complete the task?
+            "tool_correctness",   # Did it call the right tools?
+            "trajectory_score",   # Does the tool call sequence match expectations?
+        ]
+        if expected_text:
+            eval_metrics_list.append("similarity")
+
+        eval_results = await asyncio.to_thread(
+            evaluator.evaluate,
             input_text=input_text,
             output=exec_result.output,
-            metrics=["answer_relevancy"],
+            expected=expected_text,
+            metrics=eval_metrics_list,
+            tool_calls=exec_result.tool_calls or [],
+            expected_tool_calls=expected_tool_calls,
+            trajectory_spec=trajectory_spec,
         )
+
+        # ── Tool routing analysis ──
+        actual_agents = [tc.get("args", {}).get("agent", tc.get("name", "")) for tc in (exec_result.tool_calls or [])]
+        expected_agents = [etc["args"]["agent"] for etc in expected_tool_calls]
+        called_set = set(actual_agents)
+        expected_set = set(expected_agents)
+        missing_agents = sorted(expected_set - called_set)
+        extra_agents = sorted(called_set - expected_set)
+        routing_correct = (called_set == expected_set)
+
+        tool_routing_info = {
+            "agents_called": actual_agents,
+            "agents_expected": expected_agents,
+            "count": len(exec_result.tool_calls or []),
+            "expected_count": len(expected_tool_calls),
+            "routing_correct": routing_correct,
+            "missing_agents": missing_agents,
+            "extra_agents": extra_agents,
+        }
+
         avg_score = round(sum(r.score for r in eval_results) / len(eval_results), 1) if eval_results else 0
-        passed = all(r.passed for r in eval_results) if eval_results else False
+        passed = avg_score >= 70.0
 
         # Save to history
         result = Result(
@@ -2108,7 +2303,7 @@ async def workflow_quick_test(workflow_id: str, req: Request):
             score=avg_score,
             passed=passed,
             latency_ms=exec_result.latency_ms,
-            evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason) for r in eval_results],
+            evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic')) for r in eval_results],
         )
         storage.save_result(result)
 
@@ -2119,7 +2314,8 @@ async def workflow_quick_test(workflow_id: str, req: Request):
             "passed": passed,
             "error": None,
             "tool_calls": exec_result.tool_calls or [],
-            "evaluations": [{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason} for r in eval_results],
+            "tool_routing": tool_routing_info,
+            "evaluations": [{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason, "scored_by": getattr(r, 'scored_by', 'heuristic')} for r in eval_results],
         }
     except Exception as e:
         logger.exception("Error in workflow quick test")
@@ -2170,7 +2366,7 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
             trajectory_stats["tests_with_trajectory"] += 1
 
         try:
-            exec_result = await executor.execute(endpoint, test_input)
+            exec_result = await _execute_with_autostart(endpoint, test_input)
 
             if exec_result.error:
                 results.append({
@@ -2186,7 +2382,8 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
                 })
                 continue
 
-            eval_results = evaluator.evaluate(
+            eval_results = await asyncio.to_thread(
+                evaluator.evaluate,
                 input_text=test_input,
                 output=exec_result.output,
                 expected=expected,
@@ -2204,7 +2401,7 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
                 passed_count += 1
             total_score += avg_score
 
-            evals_list = [{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason} for r in eval_results]
+            evals_list = [{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason, "scored_by": getattr(r, 'scored_by', 'heuristic')} for r in eval_results]
             all_eval_results.append({"passed": all_passed, "latency_ms": exec_result.latency_ms, "evaluations": evals_list})
 
             # Extract trajectory and rubric results from eval details
@@ -2227,7 +2424,7 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
                 score=avg_score,
                 passed=all_passed,
                 latency_ms=exec_result.latency_ms,
-                evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason) for r in eval_results],
+                evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic')) for r in eval_results],
                 trajectory_result=trajectory_result,
                 rubric_results=rubric_results,
             )
@@ -2423,9 +2620,44 @@ async def fleet_status():
     }
 
 
+@app.post("/api/fleet/warmup")
+async def fleet_warmup(include_orchestrator: bool = True):
+    """Proactively start demo fleet agents and return resulting health status."""
+    requested = []
+    results = []
+
+    for agent_def in STANDALONE_AGENTS:
+        port = agent_def.get("port")
+        if not include_orchestrator and port == 8010:
+            continue
+
+        requested.append(agent_def)
+        was_healthy = await _is_agent_port_healthy(port)
+        if not was_healthy:
+            await _ensure_demo_agents_running_for_endpoint(agent_def["endpoint"])
+        is_healthy = await _is_agent_port_healthy(port)
+
+        results.append({
+            "name": agent_def["name"],
+            "endpoint": agent_def["endpoint"],
+            "port": port,
+            "was_healthy": was_healthy,
+            "status": "healthy" if is_healthy else "offline",
+        })
+
+    healthy = sum(1 for r in results if r["status"] == "healthy")
+    return {
+        "requested": len(requested),
+        "healthy": healthy,
+        "offline": len(results) - healthy,
+        "include_orchestrator": include_orchestrator,
+        "agents": results,
+    }
+
+
 @app.post("/api/fleet/evaluate-orchestrator")
 async def evaluate_orchestrator():
-    """Run orchestrator demo tests (backward compatible — delegates to workflow evaluation)."""
+    """Run orchestrator demo tests (backward compatible â€” delegates to workflow evaluation)."""
     # Try to find "Travel Demo" workflow first
     workflow = storage.get_workflow_by_name("Travel Demo")
     if workflow and workflow.test_suite_path:
@@ -2497,7 +2729,7 @@ async def _run_tests_for_agent(
         context = test.get("context")
 
         # Execute
-        response = await executor.execute(
+        response = await _execute_with_autostart(
             endpoint=agent.endpoint,
             input_text=input_text,
             context=context,
@@ -2505,7 +2737,8 @@ async def _run_tests_for_agent(
         )
 
         # Evaluate
-        eval_results = evaluator.evaluate(
+        eval_results = await asyncio.to_thread(
+            evaluator.evaluate,
             input_text=input_text,
             output=response.output,
             expected=expected,
@@ -2908,7 +3141,7 @@ async def run_chain(chain_id: str, request: ChainRunRequest):
                 auth_config = AuthConfigRequest(**agent.auth_config)
                 auth_headers = auth_config.to_headers()
 
-            result = await executor.execute(agent.endpoint, step_input, headers=auth_headers)
+            result = await _execute_with_autostart(agent.endpoint, step_input, headers=auth_headers)
 
             # Per-step evaluation
             step_evals = []
@@ -2919,7 +3152,8 @@ async def run_chain(chain_id: str, request: ChainRunRequest):
                 eval_metrics = step.metrics or ["answer_relevancy"]
                 if step.expected_tool_calls and "tool_correctness" not in eval_metrics:
                     eval_metrics.append("tool_correctness")
-                eval_results = evaluator.evaluate(
+                eval_results = await asyncio.to_thread(
+                    evaluator.evaluate,
                     input_text=step_input,
                     output=result.output,
                     expected=step.expected_output,
@@ -2928,7 +3162,7 @@ async def run_chain(chain_id: str, request: ChainRunRequest):
                     tool_calls=step_tool_calls,
                     expected_tool_calls=step.expected_tool_calls,
                 )
-                step_evals = [{"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason} for e in eval_results]
+                step_evals = [{"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')} for e in eval_results]
                 if step_evals:
                     step_score = sum(e["score"] for e in step_evals) / len(step_evals)
 
@@ -3090,7 +3324,7 @@ async def run_chain_with_suite(chain_id: str, suite_id: str):
                     auth_config = AuthConfigRequest(**agent.auth_config)
                     auth_headers = auth_config.to_headers()
 
-                result = await executor.execute(agent.endpoint, step_input, headers=auth_headers)
+                result = await _execute_with_autostart(agent.endpoint, step_input, headers=auth_headers)
 
                 # Per-step evaluation
                 step_evals = []
@@ -3101,7 +3335,8 @@ async def run_chain_with_suite(chain_id: str, suite_id: str):
                     eval_metrics = step.metrics or ["answer_relevancy"]
                     if step.expected_tool_calls and "tool_correctness" not in eval_metrics:
                         eval_metrics.append("tool_correctness")
-                    eval_results = evaluator.evaluate(
+                    eval_results = await asyncio.to_thread(
+                        evaluator.evaluate,
                         input_text=step_input,
                         output=result.output,
                         expected=step.expected_output,
@@ -3110,7 +3345,7 @@ async def run_chain_with_suite(chain_id: str, suite_id: str):
                         tool_calls=step_tool_calls,
                         expected_tool_calls=step.expected_tool_calls,
                     )
-                    step_evals = [{"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason} for e in eval_results]
+                    step_evals = [{"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')} for e in eval_results]
                     if step_evals:
                         step_score = sum(e["score"] for e in step_evals) / len(step_evals)
 
@@ -3375,14 +3610,16 @@ async def run_conversation(conv_id: str, endpoint: Optional[str] = None, thresho
     turn_dicts = [{"role": t.role, "content": t.content} for t in conv.turns]
 
     # Execute conversation
-    exec_results = await executor.execute_conversation(
+    exec_results = await _execute_conversation_with_autostart(
         target_endpoint, turn_dicts, headers=headers, context=conv.context
     )
 
-    # Evaluate each turn
-    turn_results = []
+    # ── PHASE 1: Build conversation history (fast, no LLM) ──────────────
+    # Collect all turn data first so we can evaluate everything in parallel.
+    eval_jobs = []          # list of dicts with all info needed for eval
     conversation_history = []
     user_turn_idx = 0
+    error_results = []      # (index, ConversationTurnResult) for failed turns
 
     for turn in conv.turns:
         if turn.role != "user":
@@ -3393,13 +3630,14 @@ async def run_conversation(conv_id: str, endpoint: Optional[str] = None, thresho
             break
 
         exec_result = exec_results[user_turn_idx]
+        turn_index = user_turn_idx
         user_turn_idx += 1
 
         conversation_history.append({"role": "user", "content": turn.content})
 
         if exec_result.error:
-            turn_results.append(ConversationTurnResult(
-                turn_index=len(turn_results),
+            error_results.append((turn_index, ConversationTurnResult(
+                turn_index=turn_index,
                 input=turn.content,
                 output="",
                 latency_ms=exec_result.latency_ms,
@@ -3407,66 +3645,123 @@ async def run_conversation(conv_id: str, endpoint: Optional[str] = None, thresho
                 score=0.0,
                 passed=False,
                 error=exec_result.error,
-            ))
+            )))
             continue
 
-        # Add assistant response to history
         conversation_history.append({"role": "assistant", "content": exec_result.output})
 
-        # Select metrics for this turn
+        # Select metrics — lean default set for conversation tests
         turn_metrics = turn.check_metrics
+        if not turn_metrics:
+            turn_metrics = ["answer_relevancy", "toxicity", "task_completion"]
+            if turn.expected:
+                turn_metrics.append("similarity")
+            if len(conversation_history) > 2:
+                turn_metrics.extend(["coherence", "context_retention"])
 
-        # Evaluate
-        evals = evaluator.evaluate(
-            input_text=turn.content,
-            output=exec_result.output,
-            expected=turn.expected,
-            context=conv.context,
-            metrics=turn_metrics,
+        eval_jobs.append({
+            "turn_index": turn_index,
+            "turn": turn,
+            "exec_result": exec_result,
+            "metrics": turn_metrics,
+            "history_snapshot": list(conversation_history[:-1]) if len(conversation_history) > 2 else None,
+        })
+
+    # ── PHASE 2: Evaluate ALL turns in PARALLEL (single batch) ──────────
+    # Submit every turn's evaluation concurrently. The evaluator already
+    # parallelizes DeepEval metrics within each call, so this gives us
+    # full concurrency: all turns × all metrics at once.
+    async def _eval_turn(job):
+        return await asyncio.to_thread(
+            evaluator.evaluate,
+            input_text=job["turn"].content,
+            output=job["exec_result"].output,
+            expected=job["turn"].expected,
+            metrics=job["metrics"],
             threshold=eval_threshold,
-            tool_calls=exec_result.tool_calls,
-            expected_tool_calls=turn.expected_tool_calls,
-            conversation_history=conversation_history[:-1] if len(conversation_history) > 2 else None,
+            tool_calls=job["exec_result"].tool_calls,
+            expected_tool_calls=job["turn"].expected_tool_calls,
+            conversation_history=job["history_snapshot"],
         )
 
+    # Also evaluate coherence + retention in the same parallel batch
+    coherence_job = None
+    retention_job = None
+    if len(conversation_history) > 2 and eval_jobs:
+        last_job = eval_jobs[-1]
+        coherence_job = asyncio.to_thread(
+            evaluator.evaluate,
+            input_text=last_job["turn"].content,
+            output=last_job["exec_result"].output,
+            metrics=["coherence"],
+            conversation_history=conversation_history,
+        )
+        retention_job = asyncio.to_thread(
+            evaluator.evaluate,
+            input_text=last_job["turn"].content,
+            output=last_job["exec_result"].output,
+            metrics=["context_retention"],
+            conversation_history=conversation_history,
+        )
+
+    # Gather ALL evaluations at once
+    all_tasks = [_eval_turn(job) for job in eval_jobs]
+    if coherence_job:
+        all_tasks.append(coherence_job)
+    if retention_job:
+        all_tasks.append(retention_job)
+
+    all_eval_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+
+    # ── PHASE 3: Assemble results ──────────────────────────────────────
+    turn_results = []
+    for i, job in enumerate(eval_jobs):
+        evals_or_error = all_eval_results[i]
+        if isinstance(evals_or_error, Exception):
+            logger.error(f"Eval error for turn {job['turn_index']}: {evals_or_error}")
+            evals = []
+        else:
+            evals = evals_or_error
+
         eval_metrics = [
-            EvalMetric(metric=e.metric, score=e.score, passed=e.passed, reason=e.reason)
+            EvalMetric(metric=e.metric, score=e.score, passed=e.passed, reason=e.reason, scored_by=getattr(e, 'scored_by', 'heuristic'))
             for e in evals
         ]
         avg_score = sum(e.score for e in evals) / len(evals) if evals else 0
-        all_passed = all(e.passed for e in evals) if evals else False
+        turn_passed = avg_score >= eval_threshold
 
         turn_results.append(ConversationTurnResult(
-            turn_index=len(turn_results),
-            input=turn.content,
-            output=exec_result.output,
-            latency_ms=exec_result.latency_ms,
+            turn_index=job["turn_index"],
+            input=job["turn"].content,
+            output=job["exec_result"].output,
+            latency_ms=job["exec_result"].latency_ms,
             evaluations=eval_metrics,
             score=round(avg_score, 1),
-            passed=all_passed,
-            tool_calls=exec_result.tool_calls,
+            passed=turn_passed,
+            tool_calls=job["exec_result"].tool_calls,
         ))
+
+    # Insert error results at correct positions
+    for idx, err_result in error_results:
+        turn_results.insert(idx, err_result)
+
+    # Extract coherence/retention from the tail of all_eval_results
+    coherence_eval = []
+    retention_eval = []
+    extra_offset = len(eval_jobs)
+    if coherence_job:
+        r = all_eval_results[extra_offset]
+        coherence_eval = r if not isinstance(r, Exception) else []
+        extra_offset += 1
+    if retention_job:
+        r = all_eval_results[extra_offset]
+        retention_eval = r if not isinstance(r, Exception) else []
 
     # Calculate overall conversation metrics
     total_turns = len(turn_results)
     passed_turns = sum(1 for t in turn_results if t.passed)
     avg_score = sum(t.score for t in turn_results) / total_turns if total_turns > 0 else 0
     total_latency = sum(t.latency_ms for t in turn_results)
-
-    # Calculate coherence and context retention scores
-    coherence_eval = evaluator.evaluate(
-        input_text=conv.turns[-1].content if conv.turns else "",
-        output=turn_results[-1].output if turn_results else "",
-        metrics=["coherence"],
-        conversation_history=conversation_history,
-    ) if len(conversation_history) > 2 else []
-
-    retention_eval = evaluator.evaluate(
-        input_text=conv.turns[-1].content if conv.turns else "",
-        output=turn_results[-1].output if turn_results else "",
-        metrics=["context_retention"],
-        conversation_history=conversation_history,
-    ) if len(conversation_history) > 2 else []
 
     coherence_score = coherence_eval[0].score if coherence_eval else 0
     retention_score = retention_eval[0].score if retention_eval else 0
@@ -3681,12 +3976,13 @@ async def run_evaluation_wizard(request: WizardRequest):
             test_metrics = test_data.get("metrics")
 
             # Execute
-            exec_result = await executor.execute(
+            exec_result = await _execute_with_autostart(
                 request.endpoint, test_input, headers=headers, context=test_context
             )
 
             # Evaluate
-            evals = evaluator.evaluate(
+            evals = await asyncio.to_thread(
+                evaluator.evaluate,
                 input_text=test_input,
                 output=exec_result.output,
                 expected=test_expected,
@@ -3698,7 +3994,7 @@ async def run_evaluation_wizard(request: WizardRequest):
             )
 
             eval_metrics = [
-                EvalMetric(metric=e.metric, score=e.score, passed=e.passed, reason=e.reason)
+                EvalMetric(metric=e.metric, score=e.score, passed=e.passed, reason=e.reason, scored_by=getattr(e, 'scored_by', 'heuristic'))
                 for e in evals
             ]
             avg_score = sum(e.score for e in evals) / len(evals) if evals else 0
@@ -4102,11 +4398,12 @@ async def run_consistency_test(request: ConsistencyRequest):
 
     for i in range(request.runs):
         try:
-            exec_result = await executor.execute(
+            exec_result = await _execute_with_autostart(
                 request.endpoint, request.input, headers=headers, context=request.context
             )
 
-            evals = evaluator.evaluate(
+            evals = await asyncio.to_thread(
+                evaluator.evaluate,
                 input_text=request.input,
                 output=exec_result.output,
                 expected=request.expected,
@@ -4260,7 +4557,7 @@ async def run_multi_agent_comparison(request: MultiAgentCompareRequest):
 
         for test in tests:
             try:
-                result = await executor.execute(
+                result = await _execute_with_autostart(
                     agent.endpoint,
                     test.input,
                     headers=headers,
@@ -4268,7 +4565,8 @@ async def run_multi_agent_comparison(request: MultiAgentCompareRequest):
                 )
 
                 # Evaluate
-                eval_results = evaluator.evaluate(
+                eval_results = await asyncio.to_thread(
+                    evaluator.evaluate,
                     input_text=test.input,
                     output=result.output,
                     expected=test.expected,

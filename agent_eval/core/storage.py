@@ -1,4 +1,4 @@
-"""
+﻿"""
 SQLite storage for Lilly Agent Eval.
 
 Simple, single-file database for tests, suites, results, and batches.
@@ -262,7 +262,7 @@ class Storage:
         """)
         conn.commit()
 
-        # Migrations — add columns idempotently
+        # Migrations â€” add columns idempotently
         for migration in [
             "ALTER TABLE results ADD COLUMN trajectory_data TEXT",
             "ALTER TABLE results ADD COLUMN rubric_data TEXT",
@@ -395,7 +395,7 @@ class Storage:
         """Save an evaluation result."""
         conn = self._get_conn()
         evaluations_json = json.dumps([
-            {"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason}
+            {"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')}
             for e in result.evaluations
         ])
         trajectory_json = json.dumps(result.trajectory_result) if result.trajectory_result else None
@@ -430,7 +430,8 @@ class Storage:
                     metric=e["metric"],
                     score=e["score"],
                     passed=e["passed"],
-                    reason=e["reason"]
+                    reason=e["reason"],
+                    scored_by=e.get("scored_by", "heuristic")
                 )
                 for e in evals_data
             ]
@@ -509,7 +510,8 @@ class Storage:
                     metric=e["metric"],
                     score=e["score"],
                     passed=e["passed"],
-                    reason=e["reason"]
+                    reason=e["reason"],
+                    scored_by=e.get("scored_by", "heuristic")
                 )
                 for e in evals_data
             ]
@@ -542,7 +544,7 @@ class Storage:
         for row in rows:
             evals_data = json.loads(row["evaluations"]) if row["evaluations"] else []
             evaluations = [
-                EvalMetric(metric=e["metric"], score=e["score"], passed=e["passed"], reason=e["reason"])
+                EvalMetric(metric=e["metric"], score=e["score"], passed=e["passed"], reason=e["reason"], scored_by=e.get("scored_by", "heuristic"))
                 for e in evals_data
             ]
             results.append(Result(
@@ -1394,7 +1396,7 @@ class Storage:
                 output=t["output"],
                 latency_ms=t["latency_ms"],
                 evaluations=[
-                    EvalMetric(metric=e["metric"], score=e["score"], passed=e["passed"], reason=e["reason"])
+                    EvalMetric(metric=e["metric"], score=e["score"], passed=e["passed"], reason=e["reason"], scored_by=e.get("scored_by", "heuristic"))
                     for e in t.get("evaluations", [])
                 ],
                 score=t["score"],
