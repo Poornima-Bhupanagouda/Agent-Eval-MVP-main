@@ -84,6 +84,17 @@ def build_agent_input(original_input: str, agent_id: str) -> str:
         return f"What's the weather forecast for {location}?"
 
     elif agent_id == "wiki_agent":
+        # Preserve the user's intent (history, culture, attractions, etc.)
+        # instead of hardcoding a generic query
+        lower = original_input.lower()
+        intent_keywords = []
+        for kw in ["history", "culture", "food", "cuisine", "architecture",
+                    "landmarks", "museums", "art", "religion", "language",
+                    "economy", "politics", "sports", "music", "nightlife"]:
+            if kw in lower:
+                intent_keywords.append(kw)
+        if intent_keywords:
+            return f"Tell me about {', '.join(intent_keywords)} of {location}"
         return f"Tell me about {location}"
 
     elif agent_id == "calculator_agent":
@@ -127,14 +138,18 @@ def extract_subject(text: str) -> str:
     """Extract the main subject/location from the query."""
     lower = text.lower()
 
+    # Common clause-breakers: prepositions/conjunctions that start a secondary phrase
+    STOP = r"(?:what|and|how|where|when|tell|with|for|from|including|during|about|on|i\s+want|budget|tips|cheap)"
+
     # Patterns for extracting location — stop at sentence boundary or secondary clause
     patterns = [
-        r"(?:plan(?:ning)?)\s+(?:a\s+)?(?:trip|visit|vacation|holiday)\s+(?:to\s+)?([A-Za-z][A-Za-z\s]{1,30}?)(?:\.|,|\?|$|\s+(?:what|and|how|where|when|tell|i\s+want))",
-        r"(?:trip|travel|going)\s+to\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\.|,|\?|$|\s+(?:what|and|how|where|when|tell))",
-        r"(?:want\s+to\s+(?:visit|go\s+to|see|explore))\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\.|,|\?|$|\s+(?:what|and|how|next|this))",
-        r"(?:visit(?:ing)?|explore|see)\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\.|,|\?|$|\s+(?:what|and|how|next|this))",
-        r"(?:weather|forecast)\s+(?:in|for)\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\.|,|\?|$|\s+(?:and|what))",
-        r"(?:about|history of)\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\.|,|\?|$|\s+(?:and|what))",
+        # "plan a 3-day trip to Paris with budget tips"
+        rf"(?:plan(?:ning)?)\s+(?:a\s+)?(?:\S+\s+)?(?:trip|visit|vacation|holiday)\s+(?:to\s+)?([A-Za-z][A-Za-z\s]{{1,30}}?)(?:\.|,|\?|$|\s+{STOP})",
+        rf"(?:trip|travel|going)\s+to\s+([A-Za-z][A-Za-z\s]{{1,30}}?)(?:\.|,|\?|$|\s+{STOP})",
+        rf"(?:want\s+to\s+(?:visit|go\s+to|see|explore))\s+([A-Za-z][A-Za-z\s]{{1,30}}?)(?:\.|,|\?|$|\s+{STOP})",
+        rf"(?:visit(?:ing)?|explore|see)\s+([A-Za-z][A-Za-z\s]{{1,30}}?)(?:\.|,|\?|$|\s+{STOP})",
+        rf"(?:weather|forecast)\s+(?:in|for)\s+([A-Za-z][A-Za-z\s]{{1,30}}?)(?:\.|,|\?|$|\s+{STOP})",
+        rf"(?:about|history of)\s+([A-Za-z][A-Za-z\s]{{1,30}}?)(?:\.|,|\?|$|\s+{STOP})",
     ]
 
     for pattern in patterns:
@@ -142,7 +157,8 @@ def extract_subject(text: str) -> str:
         if match:
             result = match.group(1).strip().rstrip('.,!?').strip()
             # Remove trailing stop words (e.g. "next", "this", "weekend")
-            trailing_stop = {'next', 'this', 'last', 'the', 'a', 'an', 'weekend', 'week', 'month'}
+            trailing_stop = {'next', 'this', 'last', 'the', 'a', 'an', 'weekend', 'week', 'month',
+                             'with', 'budget', 'tips', 'cheap', 'for', 'from', 'including', 'during'}
             parts = result.split()
             while parts and parts[-1].lower() in trailing_stop:
                 parts.pop()
@@ -160,7 +176,9 @@ def extract_subject(text: str) -> str:
                   "travel", "what", "is", "tell", "me", "about", "compare", "and", "things",
                   "do", "in", "for", "should", "i", "know", "weather", "vs", "versus",
                   "like", "some", "famous", "landmarks", "are", "how", "let", "s", "want",
-                  "going", "next", "this", "last", "vacation", "holiday", "tour"}
+                  "going", "next", "this", "last", "vacation", "holiday", "tour",
+                  "with", "budget", "tips", "cheap", "day", "days", "from", "including", "during",
+                  "winter", "summer", "spring", "fall", "autumn", "family", "solo", "long", "short"}
     first_sentence = re.split(r'[.!?]', text)[0].strip()
     words = [
         w.strip('.,!?;:') for w in first_sentence.split()
@@ -220,6 +238,78 @@ async def call_agent(agent_id: str, input_text: str, timeout: float = 15.0) -> D
         }
 
 
+def _filter_wiki_for_travel(text: str, location: str) -> str:
+    """Filter Wikipedia text to keep only travel-relevant sentences.
+    
+    Removes dry demographic stats, population rankings, EU comparisons, 
+    and administrative details that don't help plan a trip.
+    """
+    import re as _re
+
+    # Words/phrases that signal IRRELEVANT sentences (demographics, stats)
+    IRRELEVANT_SIGNALS = [
+        "populous", "population of", "urban area", "metropolitan area",
+        "census", "municipality of", "autonomous community",
+        "administrative", "province of", "gdp", "per capita",
+        "incorporated in", "merged with", "was founded in",
+        "coordinates", "elevation", "area code",
+    ]
+
+    # Words/phrases that signal RELEVANT sentences (travel/culture)
+    RELEVANT_SIGNALS = [
+        "known for", "famous for", "landmark", "attraction", "museum",
+        "beach", "park", "cathedral", "castle", "palace", "temple",
+        "festival", "cuisine", "food", "restaurant", "nightlife",
+        "architecture", "art", "culture", "heritage", "historic",
+        "tourist", "tourism", "visit", "travel", "located on",
+        "coast", "mountain", "river", "mediterranean", "beautiful",
+        "district", "neighbourhood", "neighborhood", "quarter",
+        "church", "tower", "bridge", "square", "market", "garden",
+        "climate", "weather", "sunny", "warm", "season",
+    ]
+
+    lines = text.split("\n")
+    filtered = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Always keep short lines (headers, source links, titles)
+        if len(stripped) < 60 or stripped.startswith("Source:") or stripped.startswith("http"):
+            filtered.append(line)
+            continue
+
+        lower = stripped.lower()
+
+        # Skip sentences with irrelevant demographic/stat content
+        if any(sig in lower for sig in IRRELEVANT_SIGNALS):
+            continue
+
+        # Keep sentences with travel-relevant content
+        if any(sig in lower for sig in RELEVANT_SIGNALS):
+            filtered.append(line)
+            continue
+
+        # Keep the first sentence (usually a useful intro like "Paris is the capital of France")
+        if len(filtered) <= 2:
+            filtered.append(line)
+            continue
+
+        # For remaining sentences, keep if they mention the location
+        if location.lower() in lower:
+            filtered.append(line)
+
+    result = "\n".join(filtered).strip()
+
+    # If filtering removed too much, return original
+    if len(result) < 50:
+        return text
+
+    return result
+
+
 def synthesize_responses(query: str, agent_results: List[Dict[str, Any]]) -> str:
     """Combine agent responses into a coherent travel briefing."""
     subject = extract_subject(query)
@@ -238,7 +328,7 @@ def synthesize_responses(query: str, agent_results: List[Dict[str, Any]]) -> str
     agent_order = ["weather_agent", "wiki_agent", "calculator_agent"]
     section_headers = {
         "weather_agent": "Weather Forecast",
-        "wiki_agent": "Background & Overview",
+        "wiki_agent": "Tourist Attractions & Things To Do",
         "calculator_agent": "Country & Currency Data",
     }
 
@@ -251,7 +341,11 @@ def synthesize_responses(query: str, agent_results: List[Dict[str, Any]]) -> str
         sections.append(f"\n--- {header} ---")
 
         if result["success"]:
-            sections.append(result["output"])
+            output = result["output"]
+            # Filter wiki content to keep only travel-relevant info
+            if agent_id == "wiki_agent":
+                output = _filter_wiki_for_travel(output, subject)
+            sections.append(output)
         else:
             # Show a clean user-friendly message, not raw error details
             sections.append(f"[{result['agent_name']} data temporarily unavailable]")
@@ -358,34 +452,79 @@ async def chat(request: ChatRequest):
     start = time.time()
     workflow_id = str(uuid.uuid4())[:8]
 
-    # Step 1: Determine which agents to call
-    target_agents = route_query(request.input)
+    # --- Pipeline node functions ---
 
-    # Step 2: Build tool_calls for routing transparency
-    tool_calls = []
-    for agent_id in sorted(target_agents):
-        agent = SUB_AGENTS[agent_id]
-        tool_calls.append({
-            "name": "route_to_agent",
-            "args": {"agent": agent_id, "endpoint": agent["url"]},
-        })
+    def plan_route_node(state: dict) -> dict:
+        """Node 1: Decide which agents to call based on the query."""
+        target_agents = route_query(state["query"])
+        tool_calls = []
+        for agent_id in sorted(target_agents):
+            agent = SUB_AGENTS[agent_id]
+            tool_calls.append({
+                "name": "route_to_agent",
+                "args": {"agent": agent_id, "endpoint": agent["url"]},
+            })
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["target_agents"] = sorted(target_agents)
+        state["tool_calls"] = list(state.get("tool_calls", [])) + tool_calls
 
-    # Step 3: Call agents in parallel
-    tasks = []
-    for agent_id in sorted(target_agents):
-        agent_input = build_agent_input(request.input, agent_id)
-        tasks.append(call_agent(agent_id, agent_input))
+        # Descriptive summary for trace visualization
+        agent_names = [SUB_AGENTS[a]["name"] for a in sorted(target_agents)]
+        state["_node_summary"] = f"Routed to {len(target_agents)} agent(s): {', '.join(agent_names)}"
+        return state
 
-    agent_results = await asyncio.gather(*tasks)
+    async def call_agents_node(state: dict) -> dict:
+        """Node 2: Call all selected sub-agents in parallel."""
+        target_agents = state["intermediate"]["target_agents"]
+        tasks = []
+        for agent_id in target_agents:
+            agent_input = build_agent_input(state["query"], agent_id)
+            tasks.append(call_agent(agent_id, agent_input))
+        agent_results = await asyncio.gather(*tasks)
 
-    # Step 4: Synthesize responses
-    output = synthesize_responses(request.input, list(agent_results))
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["agent_results"] = list(agent_results)
 
-    # Step 5: Build workflow metadata
+        # Collect sub-agent tool_calls
+        sub_tool_calls = []
+        for r in agent_results:
+            for tc in r.get("tool_calls", []):
+                sub_tool_calls.append(tc)
+        state["tool_calls"] = list(state.get("tool_calls", [])) + sub_tool_calls
+
+        successful = [r for r in agent_results if r["success"]]
+        failed = [r for r in agent_results if not r["success"]]
+        return state
+
+    def synthesize_node(state: dict) -> dict:
+        """Node 3: Combine agent responses into a unified travel briefing."""
+        agent_results = state["intermediate"]["agent_results"]
+        output = synthesize_responses(state["query"], agent_results)
+        state = dict(state)
+        state["output"] = output
+
+        # Descriptive summary for trace visualization
+        successful = [r for r in agent_results if r["success"]]
+        output_len = len(output.split())
+        state["_node_summary"] = f"Merged {len(successful)} agent response(s) into {output_len}-word briefing"
+        return state
+
+    # --- Run steps sequentially ---
+    state = {"query": request.input, "intermediate": {}, "tool_calls": [], "output": "", "errors": [], "metadata": {"workflow_id": workflow_id}}
+    state = plan_route_node(state)
+    state = await call_agents_node(state)
+    state = synthesize_node(state)
+
+    # --- Build response ---
     total_latency = int((time.time() - start) * 1000)
+    agent_results = state.get("intermediate", {}).get("agent_results", [])
+    target_agents = state.get("intermediate", {}).get("target_agents", [])
+
     workflow = {
         "workflow_id": workflow_id,
-        "agents_called": sorted(target_agents),
+        "agents_called": target_agents,
         "agent_responses": [
             {
                 "agent": r["agent"],
@@ -401,9 +540,15 @@ async def chat(request: ChatRequest):
         "total_latency_ms": total_latency,
     }
 
+    # Filter tool_calls to only routing decisions (not sub-agent internals)
+    routing_tool_calls = [
+        tc for tc in state.get("tool_calls", [])
+        if tc.get("name") == "route_to_agent"
+    ]
+
     return ChatResponse(
-        output=output,
-        tool_calls=tool_calls,
+        output=state.get("output", ""),
+        tool_calls=routing_tool_calls,
         workflow=workflow,
         latency_ms=total_latency,
     )

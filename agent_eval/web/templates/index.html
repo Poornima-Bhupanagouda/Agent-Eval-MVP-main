@@ -2540,7 +2540,7 @@
                                             </div>
                                             <div class="form-group">
                                                 <label for="test-expected">Expected Output <span class="has-tooltip" data-tip="Keywords the response should contain">&#9432;</span></label>
-                                                <input type="text" id="test-expected" placeholder="Paris">
+                                                <input type="text" id="test-expected" placeholder="Paris" oninput="autoSelectMetricsFromInputs()">
                                             </div>
                                             <div class="form-group">
                                                 <label>Context for RAG <span class="has-tooltip" data-tip="Reference text for RAG evaluation">&#9432;</span></label>
@@ -2553,7 +2553,7 @@
                                                     <span class="context-domain-hint" id="context-domain-hint"></span>
                                                 </div>
                                                 <div id="context-text-mode">
-                                                    <textarea id="test-context" rows="3" placeholder="France is a country in Western Europe..."></textarea>
+                                                    <textarea id="test-context" rows="3" placeholder="France is a country in Western Europe..." oninput="autoSelectMetricsFromInputs()"></textarea>
                                                     <p class="text-sm text-muted">One context item per line</p>
                                                 </div>
                                                 <div id="context-file-mode" style="display:none;">
@@ -2565,6 +2565,14 @@
                                                     </div>
                                                     <div class="uploaded-files" id="uploaded-files-list"></div>
                                                 </div>
+                                            </div>
+                                            <div class="form-group">
+                                                <label>Expected Tool Calls <span class="has-tooltip" data-tip="Define which tools the agent SHOULD call. Enables Tool Correctness, Tool Args Accuracy, and Tool Sequence metrics.">&#9432;</span>
+                                                    <span class="try-sample-link" onclick="loadToolCallsSample()">Try sample</span>
+                                                </label>
+                                                <textarea id="test-expected-tools" rows="4" placeholder='[{"tool": "route_to_agent", "args": {"agent": "weather_agent"}}, {"tool": "route_to_agent", "args": {"agent": "wiki_agent"}}]'
+                                                    oninput="onExpectedToolsChange()"></textarea>
+                                                <p class="text-sm text-muted">JSON array of expected tool calls. Unlocks Tool Correctness, Args Accuracy &amp; Sequence metrics.</p>
                                             </div>
                                             <div class="form-group">
                                                 <label>Evaluation Metrics <span class="has-tooltip" data-tip="Auto-selected based on inputs">&#9432;</span></label>
@@ -2846,9 +2854,13 @@
                                         </div>
                                     </div>
                                     <div>
-                                        <div class="card">
+                                        <div class="card" id="chain-results" style="display:none;">
                                             <h3 class="card-title">Chain Result</h3>
-                                            <div id="chain-result">
+                                            <div id="chain-results-content"></div>
+                                        </div>
+                                        <div class="card" id="chain-result-placeholder">
+                                            <h3 class="card-title">Chain Result</h3>
+                                            <div>
                                                 <div class="empty-state">
                                                     <div class="empty-state-icon">&#128279;</div>
                                                     <p>Select a chain and run a test</p>
@@ -3225,12 +3237,13 @@
                                 <th>Agent</th>
                                 <th>Score</th>
                                 <th>Status</th>
+                                <th>Diagnosis</th>
                                 <th>Latency</th>
                             </tr>
                         </thead>
                         <tbody id="history-table">
                             <tr>
-                                <td colspan="6" class="text-center text-muted">Loading...</td>
+                                <td colspan="7" class="text-center text-muted">Loading...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -3369,19 +3382,32 @@
         </div><!-- /agents tab-content -->
 
     </div><!-- /.page-content -->
+
+    <!-- Trace Detail Modal (available globally for inline trace viewing) -->
+    <div class="modal-overlay" id="trace-detail-modal" style="display:none;" onclick="if(event.target===this)closeModal('trace-detail-modal')">
+        <div class="modal" style="max-width:820px;">
+            <div class="modal-header">
+                <h3 class="modal-title" id="trace-detail-title">Trace Detail</h3>
+                <button class="modal-close" onclick="closeModal('trace-detail-modal')">&times;</button>
+            </div>
+            <div class="modal-body" id="trace-detail-body" style="max-height:75vh; overflow-y:auto;">
+            </div>
+        </div>
+    </div>
+
     </div><!-- /.app-body -->
     </div><!-- /.app-shell -->
 
     <!-- Quick Start Wizard Modal -->
     <div class="modal-overlay" id="quick-start-modal" style="display:none;" onclick="if(event.target===this)closeModal('quick-start-modal')">
-        <div class="modal" style="max-width: 520px;">
-            <div class="modal-header">
-                <h3 class="modal-title">Quick Start</h3>
+        <div class="modal" style="max-width: 560px;">
+            <div class="modal-header" style="background:linear-gradient(135deg,#fef2f2 0%,#fff7ed 100%); border-bottom:1px solid #fecaca;">
+                <h3 class="modal-title" style="display:flex;align-items:center;gap:0.5rem;">&#128640; Quick Start</h3>
                 <button class="modal-close" onclick="closeModal('quick-start-modal')">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body" style="padding:1.25rem;">
                 <!-- Progress bar -->
-                <div class="qs-progress">
+                <div class="qs-progress" style="margin-bottom:1.25rem;">
                     <div class="qs-step active" id="qs-ind-1">1 Agent</div>
                     <div class="qs-connector"></div>
                     <div class="qs-step" id="qs-ind-2">2 Tests</div>
@@ -3393,17 +3419,29 @@
 
                 <!-- Step 1: Agent -->
                 <div id="qs-panel-1">
-                    <h4 style="margin-bottom: 0.75rem;">Which agent do you want to test?</h4>
-                    <div class="form-group">
-                        <label for="qs-endpoint">Agent Endpoint URL</label>
-                        <input type="text" id="qs-endpoint" placeholder="http://localhost:8003/chat" value="http://localhost:8003/chat">
+                    <h4 style="margin:0 0 0.25rem;">&#127919; Connect your agent</h4>
+                    <p style="font-size:0.8rem;color:#64748b;margin:0 0 1rem;">Paste the URL where your agent listens for requests.</p>
+
+                    <div class="form-group" style="margin-bottom:0.75rem;">
+                        <label for="qs-endpoint" style="font-weight:600;font-size:0.82rem;">Agent Endpoint URL</label>
+                        <input type="text" id="qs-endpoint" placeholder="http://localhost:8003/chat" value="http://localhost:8003/chat" style="font-size:0.9rem;">
                     </div>
-                    <div class="flex gap-1" style="margin-bottom: 1rem;">
-                        <button class="btn btn-secondary btn-sm" onclick="qsUseSampleAgent()">&#127974; Use Travel Demo</button>
-                        <button class="btn btn-secondary btn-sm" id="qs-test-btn" onclick="qsTestConnection()">Test Connection</button>
-                        <span id="qs-conn-status" style="font-size:0.8rem; align-self:center;"></span>
+
+                    <!-- Quick-pick cards -->
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.75rem;">
+                        <div onclick="qsUseSampleAgent()" style="cursor:pointer;padding:0.6rem;border-radius:8px;border:1px solid #e2e8f0;background:#fafafa;text-align:center;transition:all .15s;" onmouseover="this.style.borderColor='#dc2626';this.style.background='#fef2f2'" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#fafafa'">
+                            <div style="font-size:1.4rem;margin-bottom:0.2rem;">&#9992;&#65039;</div>
+                            <div style="font-size:0.8rem;font-weight:600;">Travel Demo</div>
+                            <div style="font-size:0.68rem;color:#64748b;">Built-in demo agent</div>
+                        </div>
+                        <div onclick="qsTestConnection()" id="qs-test-card" style="cursor:pointer;padding:0.6rem;border-radius:8px;border:1px solid #e2e8f0;background:#fafafa;text-align:center;transition:all .15s;" onmouseover="this.style.borderColor='#3b82f6';this.style.background='#eff6ff'" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#fafafa'">
+                            <div style="font-size:1.4rem;margin-bottom:0.2rem;" id="qs-test-icon">&#128268;</div>
+                            <div style="font-size:0.8rem;font-weight:600;" id="qs-test-btn">Test Connection</div>
+                            <div style="font-size:0.68rem;color:#64748b;" id="qs-conn-status">Click to verify</div>
+                        </div>
                     </div>
-                    <div class="flex flex-between">
+
+                    <div class="flex flex-between" style="margin-top:1rem;">
                         <button class="btn btn-secondary" onclick="closeModal('quick-start-modal')">Cancel</button>
                         <button class="btn btn-primary" onclick="qsNext(1)">Next &#8594;</button>
                     </div>
@@ -3411,17 +3449,48 @@
 
                 <!-- Step 2: Tests -->
                 <div id="qs-panel-2" style="display:none;">
-                    <h4 style="margin-bottom: 0.75rem;">What tests should we run?</h4>
-                    <div class="form-group">
-                        <label><input type="radio" name="qs-test-source" value="sample" checked onchange="qsToggleTestSource()"> Use sample tests (Travel Demo)</label>
-                        <p class="text-muted" style="font-size:0.78rem; margin: 0.2rem 0 0.75rem 1.25rem;">5 pre-built queries covering trip planning, weather, and history.</p>
-                        <label><input type="radio" name="qs-test-source" value="suite" onchange="qsToggleTestSource()"> Use existing suite</label>
-                        <div id="qs-suite-picker" style="display:none; margin: 0.4rem 0 0 1.25rem;">
-                            <select id="qs-suite-select" style="width:100%;"></select>
+                    <h4 style="margin:0 0 0.25rem;">&#128221; Choose what to test</h4>
+                    <p style="font-size:0.8rem;color:#64748b;margin:0 0 1rem;">Pick a set of test questions to send to your agent.</p>
+
+                    <!-- Option cards (not radio buttons) -->
+                    <div style="display:flex;flex-direction:column;gap:0.6rem;">
+                        <!-- Sample tests card -->
+                        <div id="qs-test-card-sample" onclick="qsSelectTestSource('sample')" style="cursor:pointer;padding:0.85rem 1rem;border-radius:10px;border:2px solid #dc2626;background:#fef2f2;transition:all .15s;">
+                            <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.4rem;">
+                                <span style="font-size:1.3rem;">&#9992;&#65039;</span>
+                                <div>
+                                    <div style="font-weight:700;font-size:0.9rem;">Try with sample tests</div>
+                                    <div style="font-size:0.75rem;color:#64748b;">Best for first-time testing — no setup needed</div>
+                                </div>
+                                <span id="qs-sample-check" style="margin-left:auto;font-size:1.1rem;color:#dc2626;">&#10003;</span>
+                            </div>
+                            <div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-top:0.4rem;">
+                                <span style="font-size:0.7rem;padding:2px 8px;background:#dbeafe;color:#1e40af;border-radius:10px;">Plan a trip to Tokyo</span>
+                                <span style="font-size:0.7rem;padding:2px 8px;background:#dcfce7;color:#166534;border-radius:10px;">Weather in Paris?</span>
+                                <span style="font-size:0.7rem;padding:2px 8px;background:#fef3c7;color:#92400e;border-radius:10px;">History of Rome</span>
+                                <span style="font-size:0.7rem;padding:2px 8px;background:#f3e8ff;color:#6b21a8;border-radius:10px;">Convert 100 USD</span>
+                                <span style="font-size:0.7rem;padding:2px 8px;background:#fce7f3;color:#9d174d;border-radius:10px;">Capital of Australia?</span>
+                            </div>
                         </div>
-                        <p class="text-muted" style="font-size:0.78rem; margin: 0.2rem 0 0 1.25rem;" id="qs-suite-hint"></p>
+
+                        <!-- Existing suite card -->
+                        <div id="qs-test-card-suite" onclick="qsSelectTestSource('suite')" style="cursor:pointer;padding:0.85rem 1rem;border-radius:10px;border:2px solid #e2e8f0;background:#fafafa;transition:all .15s;">
+                            <div style="display:flex;align-items:center;gap:0.6rem;">
+                                <span style="font-size:1.3rem;">&#128203;</span>
+                                <div style="flex:1;">
+                                    <div style="font-weight:700;font-size:0.9rem;">Use your own test suite</div>
+                                    <div style="font-size:0.75rem;color:#64748b;">Pick a suite you've already created</div>
+                                </div>
+                                <span id="qs-suite-check" style="margin-left:auto;font-size:1.1rem;color:#dc2626;display:none;">&#10003;</span>
+                            </div>
+                            <div id="qs-suite-picker" style="display:none;margin-top:0.5rem;" onclick="event.stopPropagation()">
+                                <select id="qs-suite-select" style="width:100%;font-size:0.85rem;padding:0.4rem;border-radius:6px;border:1px solid #d1d5db;"></select>
+                            </div>
+                            <p class="text-muted" style="font-size:0.72rem; margin:0.3rem 0 0 2rem;" id="qs-suite-hint"></p>
+                        </div>
                     </div>
-                    <div class="flex flex-between" style="margin-top: 1rem;">
+
+                    <div class="flex flex-between" style="margin-top:1rem;">
                         <button class="btn btn-secondary" onclick="qsBack(2)">&#8592; Back</button>
                         <button class="btn btn-primary" onclick="qsNext(2)">Next &#8594;</button>
                     </div>
@@ -3429,15 +3498,14 @@
 
                 <!-- Step 3: Metrics -->
                 <div id="qs-panel-3" style="display:none;">
-                    <h4 style="margin-bottom: 0.5rem;">Which metrics matter to you?</h4>
-                    <div style="margin-bottom: 0.5rem;">
-                        <span class="try-sample-link" style="font-size:0.78rem; opacity:1;" onclick="qsSelectRecommended()">&#10003; Select recommended</span>
-                        &nbsp;&bull;&nbsp;
-                        <span class="try-sample-link" style="font-size:0.78rem; opacity:1;" onclick="qsSelectAll()">Select all</span>
-                        &nbsp;&bull;&nbsp;
-                        <span class="try-sample-link" style="font-size:0.78rem; opacity:1;" onclick="qsClearMetrics()">Clear</span>
+                    <h4 style="margin:0 0 0.25rem;">&#128200; What should we measure?</h4>
+                    <p style="font-size:0.8rem;color:#64748b;margin:0 0 0.75rem;">We've pre-selected the essentials. Toggle any you want to add or remove.</p>
+                    <div style="display:flex;gap:0.5rem;margin-bottom:0.6rem;flex-wrap:wrap;">
+                        <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 10px;border-radius:12px;" onclick="qsSelectRecommended()">&#10003; Recommended</button>
+                        <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 10px;border-radius:12px;" onclick="qsSelectAll()">Select all</button>
+                        <button class="btn btn-sm btn-secondary" style="font-size:0.72rem;padding:3px 10px;border-radius:12px;" onclick="qsClearMetrics()">Clear</button>
                     </div>
-                    <div id="qs-metrics-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:0.35rem; max-height:200px; overflow-y:auto;"></div>
+                    <div id="qs-metrics-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:0.35rem; max-height:220px; overflow-y:auto; padding:0.5rem; background:#fafafa; border-radius:8px; border:1px solid #e5e7eb;"></div>
                     <div class="flex flex-between" style="margin-top: 1rem;">
                         <button class="btn btn-secondary" onclick="qsBack(3)">&#8592; Back</button>
                         <button class="btn btn-primary" onclick="qsNext(3)">Next &#8594;</button>
@@ -3446,10 +3514,13 @@
 
                 <!-- Step 4: Run -->
                 <div id="qs-panel-4" style="display:none;">
-                    <div id="qs-summary-card" style="background:var(--bg); border-radius:8px; padding:1rem; margin-bottom:1rem; font-size:0.85rem;"></div>
-                    <div id="qs-running" style="display:none; text-align:center; padding:1rem;">
-                        <div class="loading-spinner" style="width:32px; height:32px; margin: 0 auto 0.75rem;"></div>
-                        <p>Running evaluation...</p>
+                    <h4 style="margin:0 0 0.25rem;">&#128640; Ready to launch</h4>
+                    <p style="font-size:0.8rem;color:#64748b;margin:0 0 0.75rem;">Review your setup and hit Run.</p>
+                    <div id="qs-summary-card" style="background:#f8fafc; border-radius:10px; padding:1rem; margin-bottom:1rem; font-size:0.85rem; border:1px solid #e5e7eb;"></div>
+                    <div id="qs-running" style="display:none; text-align:center; padding:1.5rem;">
+                        <div class="loading-spinner" style="width:36px; height:36px; margin: 0 auto 0.75rem;"></div>
+                        <p style="font-weight:600;margin:0 0 0.25rem;">Running evaluation...</p>
+                        <p style="font-size:0.78rem;color:#64748b;margin:0;">Sending queries to your agent and scoring the responses.</p>
                     </div>
                     <div id="qs-result" style="display:none;"></div>
                     <div id="qs-run-actions" class="flex flex-between">
@@ -3475,6 +3546,11 @@
             <div class="form-group">
                 <label for="suite-description">Description (optional)</label>
                 <textarea id="suite-description" rows="2" placeholder="Tests for HR policy agent accuracy"></textarea>
+            </div>
+            <div class="form-group">
+                <label for="suite-endpoint">Agent Endpoint *</label>
+                <input type="text" id="suite-endpoint" placeholder="http://localhost:8003/chat">
+                <p class="text-muted" style="font-size:0.75rem;margin-top:0.25rem;">The /chat endpoint of the agent to test</p>
             </div>
             <div class="form-group">
                 <label>Initial Tests (optional)</label>
@@ -3786,6 +3862,11 @@
                     <option value="">-- Select an agent --</option>
                 </select>
             </div>
+            <div class="form-group">
+                <label for="run-suite-endpoint-override">Or enter endpoint directly</label>
+                <input type="text" id="run-suite-endpoint-override" placeholder="http://localhost:8003/chat">
+                <p class="text-muted" style="font-size:0.75rem;margin-top:0.25rem;">Overrides the selected agent and suite endpoint</p>
+            </div>
             <div id="run-suite-info" class="text-muted mb-1"></div>
             <div class="flex gap-1">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('run-suite-modal')">Cancel</button>
@@ -3960,6 +4041,7 @@
         // Available metrics
         let availableMetrics = [];
         let selectedMetrics = new Set();
+        let userManuallyChangedMetrics = false;  // Track if user clicked metric pills
 
         // Tab switching
         document.querySelectorAll('.sidebar-item[data-tab]').forEach(item => {
@@ -4200,7 +4282,71 @@
 
         function renderMetricPills() {
             const container = document.getElementById('metric-pills');
-            container.innerHTML = availableMetrics.map(m => `
+            // Show only core metrics per agent type — hide overlapping/redundant ones
+            const agentType = agentProfile?.agent_type;
+
+            // Core metrics per agent type (curated to avoid overlap)
+            const coreMetrics = {
+                'rag': [
+                    'answer_relevancy',   // DeepEval: does the answer address the question?
+                    'faithfulness',       // DeepEval: grounded in context?
+                    'contextual_relevancy', // DeepEval: is context relevant?
+                    'toxicity',           // DeepEval: safety
+                    'task_completion',    // Did it complete the task?
+                    'similarity',         // Semantic similarity (when expected provided)
+                    'ragas_faithfulness', // RAGAS: context grounding (LLM chain-of-thought)
+                    'ragas_context_precision', // RAGAS: are best chunks ranked first?
+                    'ragas_context_recall',    // RAGAS: does context cover the answer?
+                    'ragas_answer_correctness', // RAGAS: factual correctness
+                ],
+                'conversational': [
+                    'answer_relevancy', 'toxicity', 'task_completion',
+                    'coherence', 'context_retention', 'memory_retention',
+                    'trulens_coherence', 'trulens_helpfulness',
+                ],
+                'orchestrator': [
+                    'answer_relevancy', 'toxicity', 'task_completion',
+                    'tool_correctness', 'tool_args_accuracy', 'tool_sequence',
+                    'trajectory_score',
+                ],
+                'tool_using': [
+                    'answer_relevancy', 'toxicity', 'task_completion',
+                    'tool_correctness', 'tool_args_accuracy', 'tool_sequence',
+                ],
+                'simple': [
+                    'answer_relevancy', 'toxicity', 'task_completion', 'similarity',
+                    'trulens_coherence', 'trulens_helpfulness',
+                ],
+            };
+
+            const core = coreMetrics[agentType] || null; // null = show all (no agent detected)
+            const coreSet = core ? new Set(core) : null;
+
+            // Split into core and advanced
+            const coreList = [];
+            const advancedList = [];
+            for (const m of availableMetrics) {
+                if (!coreSet) {
+                    // No agent type detected — show common metrics as core
+                    const defaultCore = new Set(['answer_relevancy', 'toxicity', 'task_completion', 'faithfulness', 'similarity', 'contextual_relevancy']);
+                    if (defaultCore.has(m.id)) coreList.push(m);
+                    else advancedList.push(m);
+                } else if (coreSet.has(m.id)) {
+                    coreList.push(m);
+                } else {
+                    advancedList.push(m);
+                }
+            }
+
+            let html = '';
+
+            // Core metrics label
+            if (coreList.length > 0 && agentType) {
+                html += `<div style="font-size:0.72rem;color:var(--text-light);margin-bottom:0.3rem;font-weight:600;">Recommended for ${agentType.replace(/_/g, ' ')} agents</div>`;
+            }
+
+            // Render core pills
+            html += coreList.map(m => `
                 <div class="metric-pill ${selectedMetrics.has(m.id) ? 'selected' : ''}"
                      data-metric="${m.id}"
                      title="${m.description}"
@@ -4209,13 +4355,135 @@
                     ${m.requires ? `<span class="text-muted">(${m.requires})</span>` : ''}
                 </div>
             `).join('');
+
+            // Advanced section (collapsed by default)
+            if (advancedList.length > 0) {
+                const advSelectedCount = advancedList.filter(m => selectedMetrics.has(m.id)).length;
+                html += `<div style="width:100%;margin-top:0.4rem;">`;
+                html += `<div style="cursor:pointer;font-size:0.75rem;color:var(--primary);font-weight:600;display:flex;align-items:center;gap:0.3rem;user-select:none;" onclick="toggleAdvancedMetrics()">`;
+                html += `<span id="adv-metrics-arrow" style="transition:transform .2s;">&#9654;</span>`;
+                html += `Show all metrics (${advancedList.length} more${advSelectedCount > 0 ? `, ${advSelectedCount} selected` : ''})`;
+                html += `</div>`;
+                html += `<div id="advanced-metrics" style="display:none;margin-top:0.3rem;padding-top:0.3rem;border-top:1px dashed var(--border);display:flex;flex-wrap:wrap;gap:0.4rem;">`;
+                html += advancedList.map(m => `
+                    <div class="metric-pill ${selectedMetrics.has(m.id) ? 'selected' : ''}"
+                         data-metric="${m.id}"
+                         title="${m.description}"
+                         onclick="toggleMetric('${m.id}')">
+                        ${m.name}
+                        ${m.requires ? `<span class="text-muted">(${m.requires})</span>` : ''}
+                    </div>
+                `).join('');
+                html += `</div></div>`;
+            }
+
+            container.innerHTML = html;
+        }
+
+        // Toggle advanced metrics visibility
+        function toggleAdvancedMetrics() {
+            const adv = document.getElementById('advanced-metrics');
+            const arrow = document.getElementById('adv-metrics-arrow');
+            if (adv.style.display === 'none' || adv.style.display === '') {
+                adv.style.display = 'flex';
+                adv.style.flexWrap = 'wrap';
+                adv.style.gap = '0.4rem';
+                arrow.style.transform = 'rotate(90deg)';
+            } else {
+                adv.style.display = 'none';
+                arrow.style.transform = '';
+            }
         }
 
         function toggleMetric(metricId) {
+            userManuallyChangedMetrics = true;  // User explicitly toggled a metric
             if (selectedMetrics.has(metricId)) {
                 selectedMetrics.delete(metricId);
             } else {
                 selectedMetrics.add(metricId);
+            }
+            renderMetricPills();
+        }
+
+        /**
+         * Auto-select metrics based on what inputs the user has filled in.
+         * Mirrors the backend _auto_select_metrics() logic so the UI pills
+         * accurately reflect what WILL be evaluated.
+         * Skips if the user manually toggled any pill.
+         */
+        function autoSelectMetricsFromInputs() {
+            if (userManuallyChangedMetrics) return;  // Don't override manual choices
+
+            const expected = (document.getElementById('test-expected')?.value || '').trim();
+            const contextText = (document.getElementById('test-context')?.value || '').trim();
+            const hasContext = contextText.length > 0 || uploadedContextFiles.length > 0;
+            const toolsVal = (document.getElementById('test-expected-tools')?.value || '').trim();
+            let hasTools = false;
+            try { if (toolsVal) { JSON.parse(toolsVal); hasTools = true; } } catch(e) {}
+
+            selectedMetrics.clear();
+
+            // ── If agent was discovered, use backend-suggested metrics ──
+            // The backend's get_suggested_metrics() already routes to the correct
+            // framework (RAGAS for RAG, TruLens for others) based on availability.
+            if (agentProfile && agentProfile.suggested_metrics && agentProfile.suggested_metrics.length > 0) {
+                agentProfile.suggested_metrics.forEach(m => {
+                    if (availableMetrics.find(am => am.id === m)) selectedMetrics.add(m);
+                });
+
+                // Add data-driven metrics on top of agent-type suggestions
+                if (expected && !['rag', 'orchestrator'].includes(agentProfile.agent_type)) {
+                    if (availableMetrics.find(am => am.id === 'similarity')) selectedMetrics.add('similarity');
+                }
+                if (hasTools) {
+                    ['tool_correctness', 'tool_args_accuracy'].forEach(m => {
+                        if (availableMetrics.find(am => am.id === m)) selectedMetrics.add(m);
+                    });
+                }
+
+                renderMetricPills();
+                return;
+            }
+
+            // ── No agent discovered: fallback to input-based selection ──
+            // Always: base metrics
+            ['answer_relevancy', 'toxicity', 'task_completion'].forEach(m => {
+                if (availableMetrics.find(am => am.id === m)) selectedMetrics.add(m);
+            });
+
+            // If context provided: core RAG metrics (no duplicates)
+            if (hasContext) {
+                ['faithfulness', 'contextual_relevancy'].forEach(m => {
+                    if (availableMetrics.find(am => am.id === m)) selectedMetrics.add(m);
+                });
+            }
+
+            // If expected answer provided: similarity
+            if (expected) {
+                if (availableMetrics.find(am => am.id === 'similarity')) selectedMetrics.add('similarity');
+            }
+
+            // If expected tool calls provided: tool metrics
+            if (hasTools) {
+                ['tool_correctness', 'tool_args_accuracy', 'tool_sequence'].forEach(m => {
+                    if (availableMetrics.find(am => am.id === m)) selectedMetrics.add(m);
+                });
+            }
+
+            renderMetricPills();
+        }
+
+        /**
+         * After a test result comes back, sync the metric pills to show
+         * exactly which metrics were actually evaluated.
+         */
+        function syncMetricsFromResult(result) {
+            if (!result || !result.evaluations) return;
+            selectedMetrics.clear();
+            for (const ev of result.evaluations) {
+                if (availableMetrics.find(am => am.id === ev.metric)) {
+                    selectedMetrics.add(ev.metric);
+                }
             }
             renderMetricPills();
         }
@@ -4755,6 +5023,32 @@
             showToast('Sample loaded' + (agentProfile ? ` for ${agentProfile.domain || agentProfile.agent_type} agent` : ''), 'success');
         }
 
+        function loadToolCallsSample() {
+            const toolsEl = document.getElementById('test-expected-tools');
+            if (!toolsEl) return;
+            // Use agent-specific sample if available
+            if (agentProfile && agentProfile.sub_agents && agentProfile.sub_agents.length > 0) {
+                const calls = agentProfile.sub_agents.map(sa => ({
+                    tool: "route_to_agent",
+                    args: { agent: sa.name.toLowerCase().replace(/\s+/g, '_') }
+                }));
+                toolsEl.value = JSON.stringify(calls, null, 2);
+            } else {
+                toolsEl.value = JSON.stringify([
+                    { tool: "route_to_agent", args: { agent: "weather_agent" } },
+                    { tool: "route_to_agent", args: { agent: "wiki_agent" } },
+                    { tool: "route_to_agent", args: { agent: "calculator_agent" } }
+                ], null, 2);
+            }
+            onExpectedToolsChange();
+            showToast('Sample tool calls loaded', 'success');
+        }
+
+        function onExpectedToolsChange() {
+            // Re-run full auto-selection which includes tool metrics logic
+            autoSelectMetricsFromInputs();
+        }
+
         function displayAgentProfile(profile) {
             const card = document.getElementById('agent-profile-card');
             card.style.display = 'block';
@@ -4772,6 +5066,7 @@
 
             // Auto-select suggested metrics (IDs now match actual evaluator metrics)
             selectedMetrics.clear();
+            userManuallyChangedMetrics = false;  // Reset — these are auto-suggested, not user's choice
             const suggestedContainer = document.getElementById('agent-suggested-metrics');
             if (profile.suggested_metrics && profile.suggested_metrics.length > 0) {
                 profile.suggested_metrics.forEach(m => {
@@ -4784,6 +5079,14 @@
             } else {
                 suggestedContainer.innerHTML = '';
             }
+            // Also add metrics based on current form inputs (context, expected, etc.)
+            autoSelectMetricsFromInputs();
+            // Re-add profile-suggested metrics on top (autoSelect clears and rebuilds)
+            if (profile.suggested_metrics) {
+                profile.suggested_metrics.forEach(m => {
+                    if (availableMetrics.find(am => am.id === m)) selectedMetrics.add(m);
+                });
+            }
             renderMetricPills();
 
             // Populate test input / expected with agent-appropriate sample
@@ -4795,6 +5098,17 @@
             }
             if (expectedEl && (!expectedEl.value) && sample.expected) {
                 expectedEl.value = sample.expected;
+            }
+
+            // Auto-populate expected_tool_calls for orchestrator/tool_using agents
+            const toolsEl = document.getElementById('test-expected-tools');
+            if (toolsEl && profile.sub_agents && profile.sub_agents.length > 0) {
+                const calls = profile.sub_agents.map(sa => ({
+                    tool: "route_to_agent",
+                    args: { agent: sa.name.toLowerCase().replace(/\s+/g, '_') }
+                }));
+                toolsEl.value = JSON.stringify(calls, null, 2);
+                onExpectedToolsChange();
             }
 
             // Update context domain hints
@@ -4886,8 +5200,14 @@
                         input,
                         expected,
                         context,
-                        metrics: selectedMetrics.size > 0 ? Array.from(selectedMetrics) : null,
-                        auth
+                        metrics: (selectedMetrics.size > 0) ? Array.from(selectedMetrics) : null,
+                        auth,
+                        expected_tool_calls: (() => {
+                            const v = (document.getElementById('test-expected-tools') || {}).value;
+                            if (v && v.trim()) { try { return JSON.parse(v.trim()); } catch(e) { return null; } }
+                            return null;
+                        })(),
+                        agent_type: agentProfile ? agentProfile.agent_type : null
                     })
                 });
 
@@ -4897,6 +5217,7 @@
                 }
 
                 const result = await response.json();
+                syncMetricsFromResult(result);
                 renderTestResult(result);
                 showToast(result.passed ? 'Test passed!' : 'Test failed', result.passed ? 'success' : 'error');
 
@@ -5083,6 +5404,15 @@
             const threshold = parseFloat(document.getElementById('threshold').value) || 70;
             const auth = getAuthConfig();
 
+            // Get context (same logic as runSingleTest)
+            let context = null;
+            if (uploadedContextFiles.length > 0) {
+                context = getContextFromFiles();
+            } else {
+                const contextText = document.getElementById('test-context').value;
+                context = contextText ? contextText.split('\n').filter(l => l.trim()) : null;
+            }
+
             const resultsDiv = document.getElementById('test-results');
             resultsDiv.innerHTML = '<div class="text-center"><span class="loading"></span> Running consistency check (3 runs)...</div>';
 
@@ -5091,8 +5421,11 @@
                     endpoint,
                     input,
                     expected,
+                    context,
                     threshold,
                     runs: 3,
+                    metrics: (selectedMetrics.size > 0) ? Array.from(selectedMetrics) : null,
+                    agent_type: agentProfile ? agentProfile.agent_type : null,
                 };
                 if (auth && auth.auth_type !== 'none') {
                     payload.auth = auth;
@@ -5227,10 +5560,23 @@
             let evalHtml = '';
             const evals = result.evaluations || [];
 
-            if (evals.length > 0) {
+            // Filter out metrics that are irrelevant for the agent type
+            const agentType = agentProfile?.agent_type;
+            const filteredEvals = evals.filter(e => {
+                if (agentType === 'rag' && e.metric === 'step_latency') return false;
+                return true;
+            });
+
+            // Recalculate score excluding filtered metrics
+            let displayScore = result.score;
+            if (filteredEvals.length < evals.length && filteredEvals.length > 0) {
+                displayScore = filteredEvals.reduce((s, e) => s + e.score, 0) / filteredEvals.length;
+            }
+
+            if (filteredEvals.length > 0) {
                 // Count engines
-                const deepevalCount = evals.filter(e => e.scored_by === 'deepeval').length;
-                const heuristicCount = evals.length - deepevalCount;
+                const deepevalCount = filteredEvals.filter(e => e.scored_by === 'deepeval').length;
+                const heuristicCount = filteredEvals.length - deepevalCount;
                 const engineSummary = [];
                 if (deepevalCount) engineSummary.push(`${deepevalCount} DeepEval (LLM)`);
                 if (heuristicCount) engineSummary.push(`${heuristicCount} Heuristic`);
@@ -5241,37 +5587,79 @@
                 evalHtml += `<span style="font-size:0.7rem;color:var(--text-light);">${engineSummary.join(' · ')}</span>`;
                 evalHtml += `</div>`;
 
-                for (const e of evals) {
-                    const scoreColor = e.score >= 70 ? '#16a34a' : e.score >= 40 ? '#ca8a04' : '#dc2626';
-                    const borderColor = e.passed ? '#86efac' : '#fca5a5';
-                    const bgColor = e.passed ? '#f0fdf420' : '#fef2f220';
-                    const engineLabel = e.scored_by === 'deepeval' ? 'DeepEval' : 'Heuristic';
-                    const engineColor = e.scored_by === 'deepeval' ? '#7c3aed' : '#9ca3af';
-                    const barWidth = Math.max(2, Math.min(100, e.score));
+                // Group metrics by category for clear display
+                const metricCategories = {
+                    'Output Quality': ['answer_relevancy', 'task_completion', 'similarity'],
+                    'Context Quality': ['faithfulness', 'hallucination', 'contextual_relevancy', 'precision_at_k', 'recall_at_k', 'mrr'],
+                    'Tool Use': ['tool_correctness', 'tool_args_accuracy', 'tool_sequence', 'trajectory_score', 'tool_usage_correctness', 'tool_order_correctness'],
+                    'Agent Internals': ['node_success_rate', 'step_latency', 'agent_reasoning', 'step_count_limit', 'failure_recovery'],
+                    'Safety': ['toxicity', 'bias'],
+                    'Conversation': ['coherence', 'context_retention', 'memory_retention'],
+                    'Other': ['rubric_score'],
+                };
+                const categoryIcons = {
+                    'Output Quality': '&#128172;', 'Context Quality': '&#128218;',
+                    'Tool Use': '&#128295;', 'Agent Internals': '&#129504;',
+                    'Safety': '&#128737;', 'Conversation': '&#128488;', 'Other': '&#128196;',
+                };
 
-                    evalHtml += `<div style="border-left:3px solid ${borderColor};padding:0.5rem 0.6rem;margin-bottom:0.4rem;background:${bgColor};border-radius:0 4px 4px 0;">`;
-                    evalHtml += `<div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">`;
-                    evalHtml += `<span style="font-size:0.9rem;">${e.passed ? '&#10003;' : '&#10007;'}</span>`;
-                    evalHtml += `<span style="font-weight:600;font-size:0.85rem;min-width:140px;">${formatMetricName(e.metric)}</span>`;
-                    evalHtml += `<span style="color:${scoreColor};font-weight:700;font-size:0.9rem;min-width:50px;">${typeof e.score === 'number' ? e.score.toFixed(1) : e.score}%</span>`;
-                    evalHtml += `<span style="font-size:0.6rem;padding:1px 6px;border-radius:8px;background:${engineColor}18;color:${engineColor};border:1px solid ${engineColor}40;font-weight:500;">${engineLabel}</span>`;
-                    evalHtml += `</div>`;
-                    // Score bar
-                    evalHtml += `<div style="margin-top:0.3rem;background:#e5e7eb;border-radius:3px;height:4px;width:100%;overflow:hidden;">`;
-                    evalHtml += `<div style="height:100%;width:${barWidth}%;background:${scoreColor};border-radius:3px;"></div>`;
-                    evalHtml += `</div>`;
-                    if (e.reason) {
-                        evalHtml += `<div style="font-size:0.75rem;color:var(--text-light);margin-top:0.25rem;">${escapeHtml(e.reason)}</div>`;
+                // Map each eval to its category
+                const grouped = {};
+                for (const e of filteredEvals) {
+                    let cat = 'Other';
+                    for (const [c, ms] of Object.entries(metricCategories)) {
+                        if (ms.includes(e.metric)) { cat = c; break; }
                     }
-                    evalHtml += '</div>';
+                    if (!grouped[cat]) grouped[cat] = [];
+                    grouped[cat].push(e);
+                }
 
-                    // Collect strengths / improvements
-                    const label = formatMetricName(e.metric);
-                    if (e.passed && e.score >= 70) {
-                        strengths.push(`${label} (${e.score.toFixed(0)}%)`);
-                    } else {
-                        improvements.push({ label, score: e.score, reason: e.reason || '' });
+                // Render each category
+                for (const [cat, items] of Object.entries(grouped)) {
+                    const catPassed = items.filter(e => e.passed).length;
+                    const catTotal = items.length;
+                    const catAvg = items.reduce((s, e) => s + e.score, 0) / catTotal;
+                    const catColor = catAvg >= 70 ? '#16a34a' : catAvg >= 40 ? '#ca8a04' : '#dc2626';
+                    const catIcon = categoryIcons[cat] || '&#128196;';
+
+                    evalHtml += `<div style="margin-bottom:0.6rem;background:#fafafa;border-radius:6px;padding:0.5rem 0.6rem;border:1px solid #e5e7eb;">`;
+                    evalHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">`;
+                    evalHtml += `<span style="font-size:0.8rem;font-weight:700;">${catIcon} ${cat}</span>`;
+                    evalHtml += `<span style="font-size:0.7rem;color:${catColor};font-weight:600;">${catPassed}/${catTotal} passed · ${catAvg.toFixed(0)}%</span>`;
+                    evalHtml += `</div>`;
+
+                    for (const e of items) {
+                        const scoreColor = e.score >= 70 ? '#16a34a' : e.score >= 40 ? '#ca8a04' : '#dc2626';
+                        const borderColor = e.passed ? '#86efac' : '#fca5a5';
+                        const bgColor = e.passed ? '#f0fdf420' : '#fef2f220';
+                        const engineLabel = e.scored_by === 'deepeval' ? 'DeepEval' : 'Heuristic';
+                        const engineColor = e.scored_by === 'deepeval' ? '#7c3aed' : '#9ca3af';
+                        const barWidth = Math.max(2, Math.min(100, e.score));
+
+                        evalHtml += `<div style="border-left:3px solid ${borderColor};padding:0.35rem 0.5rem;margin-bottom:0.3rem;background:${bgColor};border-radius:0 4px 4px 0;">`;
+                        evalHtml += `<div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">`;
+                        evalHtml += `<span style="font-size:0.9rem;">${e.passed ? '&#10003;' : '&#10007;'}</span>`;
+                        evalHtml += `<span style="font-weight:600;font-size:0.82rem;min-width:130px;">${formatMetricName(e.metric)}</span>`;
+                        evalHtml += `<span style="color:${scoreColor};font-weight:700;font-size:0.85rem;min-width:45px;">${typeof e.score === 'number' ? e.score.toFixed(1) : e.score}%</span>`;
+                        evalHtml += `<span style="font-size:0.6rem;padding:1px 5px;border-radius:8px;background:${engineColor}18;color:${engineColor};border:1px solid ${engineColor}40;font-weight:500;">${engineLabel}</span>`;
+                        evalHtml += `</div>`;
+                        evalHtml += `<div style="margin-top:0.2rem;background:#e5e7eb;border-radius:3px;height:3px;width:100%;overflow:hidden;">`;
+                        evalHtml += `<div style="height:100%;width:${barWidth}%;background:${scoreColor};border-radius:3px;"></div>`;
+                        evalHtml += `</div>`;
+                        if (e.reason) {
+                            evalHtml += `<div style="font-size:0.72rem;color:var(--text-light);margin-top:0.2rem;">${escapeHtml(e.reason)}</div>`;
+                        }
+                        evalHtml += '</div>';
+
+                        // Collect strengths / improvements
+                        const label = formatMetricName(e.metric);
+                        if (e.passed && e.score >= 70) {
+                            strengths.push(`${label} (${e.score.toFixed(0)}%)`);
+                        } else {
+                            improvements.push({ label, score: e.score, reason: e.reason || '', metric: e.metric });
+                        }
                     }
+                    evalHtml += `</div>`;
                 }
                 evalHtml += '</div>';
             } else {
@@ -5280,16 +5668,16 @@
 
             // --- overall summary panel ---
             let summaryHtml = '';
-            if (evals.length > 0) {
-                const passCount = evals.filter(e => e.passed).length;
-                const scoreVal = typeof result.score === 'number' ? result.score : 0;
+            if (filteredEvals.length > 0) {
+                const passCount = filteredEvals.filter(e => e.passed).length;
+                const scoreVal = typeof displayScore === 'number' ? displayScore : 0;
                 const overallColor = scoreVal >= 70 ? '#16a34a' : scoreVal >= 40 ? '#ca8a04' : '#dc2626';
 
                 summaryHtml = `<div style="padding:0.75rem;border-radius:8px;background:${result.passed ? '#f0fdf4' : '#fef2f2'};border:1px solid ${result.passed ? '#86efac' : '#fca5a5'};margin-top:0.75rem;">`;
                 summaryHtml += `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">`;
                 summaryHtml += `<div style="font-size:0.85rem;font-weight:700;">Overall Assessment</div>`;
                 summaryHtml += `<div style="display:flex;gap:1rem;align-items:center;">`;
-                summaryHtml += `<span style="font-size:0.8rem;">Metrics: <strong>${passCount}/${evals.length} passed</strong></span>`;
+                summaryHtml += `<span style="font-size:0.8rem;">Metrics: <strong>${passCount}/${filteredEvals.length} passed</strong></span>`;
                 summaryHtml += `<span style="font-size:1.1rem;font-weight:800;color:${overallColor};">${scoreVal.toFixed(1)}%</span>`;
                 summaryHtml += `</div></div>`;
 
@@ -5309,14 +5697,25 @@
                     // Actionable tips for the worst metric
                     const worst = improvements.sort((a,b) => a.score - b.score)[0];
                     if (worst) {
-                        let tip = '';
-                        if (worst.label.includes('Relevancy'))  tip = 'The agent\'s answer may not directly address the question. Check the prompt and retrieval logic.';
-                        else if (worst.label.includes('Similarity')) tip = 'Agent output differs significantly from the expected answer. Review expected value or agent prompt rules.';
-                        else if (worst.label.includes('Toxicity')) tip = 'Response may contain inappropriate content. Review the agent\'s system prompt for safety guardrails.';
-                        else if (worst.label.includes('Hallucination')) tip = 'Agent may be generating facts not in the provided context. Restrict the LLM to only use retrieved context.';
-                        else if (worst.label.includes('Faithfulness')) tip = 'Agent response doesn\'t align with the provided context. Tighten the RAG prompt to stay grounded.';
-                        else if (worst.label.includes('Task')) tip = 'Agent may not be completing the requested task. Check for refusal patterns or incomplete answers.';
-                        else tip = `Focus on improving ${worst.label} — currently scoring ${worst.score.toFixed(0)}%.`;
+                        const tipMap = {
+                            'answer_relevancy': 'The agent\'s answer doesn\'t fully address the question. Check the prompt, input parsing, or retrieval logic.',
+                            'similarity': 'Agent output differs from the expected answer. Review the expected value or adjust the agent prompt.',
+                            'toxicity': 'Response may contain inappropriate content. Add safety guardrails to the system prompt.',
+                            'bias': 'Response may show bias. Review the system prompt for balanced language.',
+                            'hallucination': 'Agent is generating facts not in the context. Restrict the LLM to only use retrieved documents.',
+                            'faithfulness': 'Agent response doesn\'t align with the context. Tighten the RAG prompt to stay grounded.',
+                            'contextual_relevancy': 'The retrieved context may not be relevant to the question. Improve the retrieval/embedding strategy.',
+                            'task_completion': 'Agent may not be completing the requested task. Check for refusal patterns or incomplete answers.',
+                            'tool_correctness': 'The agent didn\'t call the expected tools. Check the routing/planning logic.',
+                            'tool_args_accuracy': 'The agent called the right tools but with wrong arguments. Check how inputs are parsed and passed.',
+                            'tool_sequence': 'Tools were called in the wrong order. Review the orchestration logic.',
+                            'node_success_rate': 'One or more internal pipeline steps failed. Check the agent\'s node implementations.',
+                            'step_latency': 'A pipeline step is taking disproportionate time. Profile the slow node for optimization.',
+                            'agent_reasoning': 'The agent isn\'t following a proper reasoning pattern. Verify the pipeline structure.',
+                            'coherence': 'Responses lack consistency across turns. Check memory/state management.',
+                            'context_retention': 'The agent forgets earlier context. Verify conversation history is passed correctly.',
+                        };
+                        const tip = tipMap[worst.metric] || `Focus on improving ${worst.label} — currently scoring ${worst.score.toFixed(0)}%.`;
 
                         summaryHtml += `<div style="margin-top:0.4rem;padding:0.4rem 0.6rem;background:#fff7ed;border-left:3px solid #f59e0b;border-radius:0 4px 4px 0;font-size:0.78rem;color:#92400e;">`;
                         summaryHtml += `&#128161; <strong>Tip:</strong> ${tip}`;
@@ -5324,6 +5723,35 @@
                     }
                 }
                 summaryHtml += `</div>`;
+            }
+
+            // --- agent trace pipeline visualization ---
+            let traceHtml = '';
+            if (result.trace && result.trace.length > 0) {
+                const totalMs = result.trace.reduce((s, t) => s + (t.duration_ms || 0), 0);
+                traceHtml = `<div style="margin-top:0.75rem;padding:0.75rem;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0;">`;
+                traceHtml += `<div style="font-size:0.8rem;font-weight:700;margin-bottom:0.5rem;">&#129504; Agent Reasoning Pipeline <span style="font-weight:400;color:var(--text-light);font-size:0.7rem;">(Execution Trace — ${result.trace.length} nodes, ${totalMs}ms total)</span></div>`;
+                traceHtml += `<div style="display:flex;align-items:center;gap:0;flex-wrap:wrap;">`;
+                result.trace.forEach((t, i) => {
+                    const isOk = !t.error && (!t.result || t.result.startsWith('ok'));
+                    const nodeColor = isOk ? '#16a34a' : '#dc2626';
+                    const nodeBg = isOk ? '#f0fdf4' : '#fef2f2';
+                    const nodeBorder = isOk ? '#86efac' : '#fca5a5';
+                    const pct = totalMs > 0 ? ((t.duration_ms || 0) / totalMs * 100).toFixed(0) : '0';
+                    traceHtml += `<div style="display:flex;flex-direction:column;align-items:center;padding:0.4rem 0.6rem;background:${nodeBg};border:1px solid ${nodeBorder};border-radius:6px;min-width:90px;max-width:200px;position:relative;">`;
+                    traceHtml += `<span style="font-size:0.75rem;font-weight:700;color:${nodeColor};">${isOk ? '&#10003;' : '&#10007;'} ${escapeHtml(t.node || '?')}</span>`;
+                    traceHtml += `<span style="font-size:0.65rem;color:var(--text-light);">${t.duration_ms || 0}ms (${pct}%)</span>`;
+                    if (t.summary) {
+                        traceHtml += `<span style="font-size:0.6rem;color:#475569;margin-top:2px;text-align:center;line-height:1.3;">${escapeHtml(t.summary)}</span>`;
+                    }
+                    if (t.error) traceHtml += `<span style="font-size:0.6rem;color:#dc2626;margin-top:2px;">${escapeHtml(t.error.substring(0, 40))}</span>`;
+                    traceHtml += `</div>`;
+                    if (i < result.trace.length - 1) {
+                        traceHtml += `<span style="font-size:1.2rem;color:#94a3b8;margin:0 2px;">&#8594;</span>`;
+                    }
+                });
+                traceHtml += `</div>`;
+                traceHtml += `</div>`;
             }
 
             // --- trajectory section ---
@@ -5379,6 +5807,155 @@
                 rubricHtml += `</div>`;
             }
 
+            // --- RCA section ---
+            let rcaHtml = '';
+            if (result.rca_result && result.rca_result.diagnoses && result.rca_result.diagnoses.length > 0) {
+                rcaHtml = `<div style="margin-top:0.75rem;padding:0.75rem;background:#fffbeb;border-radius:6px;border:1px solid #fde68a;">`;
+                rcaHtml += `<div style="font-size:0.8rem;font-weight:700;margin-bottom:0.5rem;">&#128269; Root Cause Analysis</div>`;
+                for (const d of result.rca_result.diagnoses) {
+                    const confPct = Math.round((d.confidence || 0) * 100);
+                    const confColor = confPct >= 70 ? '#166534' : '#92400e';
+                    const confBg = confPct >= 70 ? '#dcfce7' : '#fef3c7';
+                    rcaHtml += `<div style="margin-bottom:0.5rem;padding:0.5rem 0.6rem;background:#fff;border-radius:6px;border-left:3px solid #f59e0b;">`;
+                    rcaHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">`;
+                    rcaHtml += `<strong style="font-size:0.82rem;">${escapeHtml((d.root_cause || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))}</strong>`;
+                    rcaHtml += `<span style="font-size:0.7rem;padding:2px 8px;border-radius:10px;background:${confBg};color:${confColor};">${confPct}% confidence</span>`;
+                    rcaHtml += `</div>`;
+                    if (d.evidence && d.evidence.length > 0) {
+                        for (const ev of d.evidence) {
+                            rcaHtml += `<div style="font-size:0.75rem;color:var(--text-light);padding-left:0.5rem;border-left:2px solid #e5e7eb;margin-top:0.2rem;">${escapeHtml(ev)}</div>`;
+                        }
+                    }
+                    if (d.recommendation) {
+                        rcaHtml += `<div style="font-size:0.75rem;margin-top:0.3rem;padding:0.3rem 0.5rem;background:#eff6ff;border-radius:4px;color:#1e40af;"><strong>Fix:</strong> ${escapeHtml(d.recommendation)}</div>`;
+                    }
+                    rcaHtml += `</div>`;
+                }
+                if (result.rca_result.summary) {
+                    rcaHtml += `<div style="font-size:0.78rem;color:var(--text-light);font-style:italic;margin-top:0.3rem;">${escapeHtml(result.rca_result.summary)}</div>`;
+                }
+                rcaHtml += `</div>`;
+            }
+
+            // --- Self-Healing section ---
+            let healingHtml = '';
+            if (result.healing_result) {
+                const hr = result.healing_result;
+                const healBg = hr.healed ? '#f0fdf4' : '#fef2f2';
+                const healBorder = hr.healed ? '#86efac' : '#fca5a5';
+                healingHtml = `<div style="margin-top:0.75rem;padding:0.75rem;background:${healBg};border-radius:6px;border:1px solid ${healBorder};">`;
+                healingHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">`;
+                healingHtml += `<span style="font-size:0.8rem;font-weight:700;">${hr.healed ? '&#9989;' : '&#9888;&#65039;'} Self-Healing</span>`;
+                healingHtml += `<span style="font-size:0.75rem;color:var(--text-light);">${hr.total_variants_tested || 0} variants tested</span>`;
+                healingHtml += `</div>`;
+                for (const rec of (hr.recommendations || [])) {
+                    healingHtml += `<div style="margin-bottom:0.4rem;padding:0.4rem 0.5rem;background:#fff;border-radius:4px;border-left:3px solid ${rec.requires_manual_review ? '#ef4444' : '#22c55e'};font-size:0.78rem;">`;
+                    healingHtml += `<strong>${escapeHtml((rec.fix_type || '').replace(/_/g, ' '))}</strong>`;
+                    if (rec.best_variant) healingHtml += `<div style="color:var(--text-light);margin-top:0.15rem;">Best: <code style="font-size:0.72rem;">${escapeHtml(JSON.stringify(rec.best_variant))}</code></div>`;
+                    if (rec.improvement) healingHtml += `<div style="color:#16a34a;margin-top:0.15rem;">${Object.entries(rec.improvement).map(([k,v]) => escapeHtml(k) + ': ' + escapeHtml(String(v))).join(', ')}</div>`;
+                    if (rec.recommendation) healingHtml += `<div style="margin-top:0.15rem;">${escapeHtml(rec.recommendation)}</div>`;
+                    healingHtml += `</div>`;
+                }
+                if (hr.summary) healingHtml += `<div style="font-size:0.78rem;color:var(--text-light);font-style:italic;">${escapeHtml(hr.summary)}</div>`;
+                healingHtml += `</div>`;
+            }
+
+            // --- Deployment Gate section ---
+            let gateHtml = '';
+            if (result.gate_result) {
+                const gr = result.gate_result;
+                const isGo = gr.decision === 'GO';
+                const gateBg = isGo ? '#f0fdf4' : '#fef2f2';
+                const gateBorder = isGo ? '#86efac' : '#fca5a5';
+                gateHtml = `<div style="margin-top:0.75rem;padding:0.75rem;background:${gateBg};border-radius:6px;border:1px solid ${gateBorder};">`;
+                gateHtml += `<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem;">`;
+                gateHtml += `<span style="font-size:0.8rem;font-weight:700;">${isGo ? '&#128994;' : '&#128308;'} Deployment Gate</span>`;
+                gateHtml += `<span class="badge ${isGo ? 'badge-success' : 'badge-danger'}" style="font-size:0.85rem;padding:4px 12px;">${escapeHtml(gr.decision || 'UNKNOWN')}</span>`;
+                gateHtml += `<span style="font-size:0.82rem;font-weight:600;">Score: ${((gr.final_score || 0) * 100).toFixed(0)}%</span>`;
+                gateHtml += `<span style="font-size:0.75rem;color:var(--text-light);">threshold: ${((gr.threshold || 0.7) * 100).toFixed(0)}%</span>`;
+                gateHtml += `</div>`;
+                if (gr.score_breakdown) {
+                    gateHtml += `<div style="display:flex;gap:0.3rem;flex-wrap:wrap;margin-bottom:0.4rem;">`;
+                    for (const [k, v] of Object.entries(gr.score_breakdown)) {
+                        gateHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:4px;background:#e2e8f0;color:#334155;">${escapeHtml(k)}: ${(v * 100).toFixed(0)}%</span>`;
+                    }
+                    gateHtml += `</div>`;
+                }
+                if (gr.recommended_action) {
+                    gateHtml += `<div style="font-size:0.78rem;padding:0.3rem 0.5rem;background:${isGo ? '#dcfce7' : '#fee2e2'};border-radius:4px;color:${isGo ? '#166534' : '#991b1b'};">${escapeHtml(gr.recommended_action)}</div>`;
+                }
+                gateHtml += `</div>`;
+            }
+
+            // --- OTel Agent X-Ray (inline trace view) ---
+            let otelHtml = '';
+            if (result.otel_spans && result.otel_spans.length > 0) {
+                const totalDur = result.otel_spans.reduce((s, sp) => s + sp.duration_ms, 0);
+                const maxDur = Math.max(...result.otel_spans.map(s => s.duration_ms), 1);
+                const errorCount = result.otel_spans.filter(s => s.status === 'ERROR').length;
+                const slowCount = result.otel_spans.filter(s => s.duration_ms > 2000).length;
+
+                otelHtml = `<div style="margin-top:0.75rem;padding:0.75rem;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">`;
+
+                // Header with title + summary badges
+                otelHtml += `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.5rem;">`;
+                otelHtml += `<div style="display:flex;align-items:center;gap:0.5rem;">`;
+                otelHtml += `<span style="font-size:0.85rem;font-weight:700;">&#128301; Agent X-Ray</span>`;
+                otelHtml += `<span style="font-size:0.68rem;color:#64748b;background:#f1f5f9;padding:2px 8px;border-radius:10px;">OpenTelemetry Trace</span>`;
+                otelHtml += `</div>`;
+                otelHtml += `<div style="display:flex;gap:0.4rem;flex-wrap:wrap;">`;
+                otelHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:10px;background:#dbeafe;color:#1e40af;font-weight:600;">${result.otel_spans.length} steps</span>`;
+                otelHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:10px;background:#f0f9ff;color:#0369a1;font-weight:600;">${totalDur.toFixed(0)}ms total</span>`;
+                if (errorCount > 0) otelHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:10px;background:#fef2f2;color:#dc2626;font-weight:600;">&#10060; ${errorCount} error${errorCount>1?'s':''}</span>`;
+                if (slowCount > 0) otelHtml += `<span style="font-size:0.72rem;padding:2px 8px;border-radius:10px;background:#fefce8;color:#d97706;font-weight:600;">&#9203; ${slowCount} slow</span>`;
+                otelHtml += `</div></div>`;
+
+                // Brief explainer (collapsible)
+                otelHtml += `<div style="font-size:0.75rem;color:#64748b;margin-bottom:0.6rem;line-height:1.4;">`;
+                otelHtml += `Each bar below is one step in the evaluation pipeline — from the agent HTTP call to each metric scored. `;
+                otelHtml += `<span style="color:#1e40af;font-weight:500;">Longer bars = slower steps.</span> `;
+                otelHtml += `<span style="color:#dc2626;">Red = errors.</span> `;
+                otelHtml += `This is how OpenTelemetry helps you find exactly where things went wrong or slow.`;
+                otelHtml += `</div>`;
+
+                // Step-by-step waterfall
+                for (let idx = 0; idx < result.otel_spans.length; idx++) {
+                    const s = result.otel_spans[idx];
+                    const durColor = s.duration_ms > 5000 ? '#dc2626' : s.duration_ms > 1000 ? '#d97706' : '#16a34a';
+                    const isErr = s.status === 'ERROR';
+                    const barPct = Math.max((s.duration_ms / maxDur) * 100, 3);
+                    const stepIcon = isErr ? '&#10060;' : s.name === 'execute_agent_call' ? '&#128640;' : s.name.startsWith('metric.') ? '&#128200;' : '&#128312;';
+                    const stepLabel = s.name === 'execute_agent_call' ? 'Agent HTTP Call'
+                        : s.name === 'evaluate_test' ? 'Full Evaluation Run'
+                        : s.name.startsWith('metric.') ? 'Metric: ' + s.name.substring(7).replace(/_/g, ' ')
+                        : s.name;
+                    const stepBg = idx % 2 === 0 ? '#ffffff' : '#f8fafc';
+
+                    otelHtml += `<div style="padding:0.3rem 0.5rem;background:${stepBg};border-radius:4px;${isErr ? 'border:1px solid #fecaca;' : ''}margin-bottom:2px;">`;
+                    otelHtml += `<div style="display:flex;justify-content:space-between;align-items:center;font-size:0.78rem;margin-bottom:2px;">`;
+                    otelHtml += `<span style="display:flex;align-items:center;gap:0.3rem;">`;
+                    otelHtml += `<span style="font-size:0.7rem;color:#94a3b8;font-weight:600;min-width:16px;">${idx + 1}.</span>`;
+                    otelHtml += `<span>${stepIcon}</span>`;
+                    otelHtml += `<strong style="color:${isErr ? '#dc2626' : 'var(--text)'};">${escapeHtml(stepLabel)}</strong>`;
+                    if (isErr) otelHtml += `<span style="background:#fef2f2;color:#dc2626;font-size:0.65rem;padding:1px 4px;border-radius:3px;font-weight:600;">ERROR</span>`;
+                    if (s.duration_ms > 2000) otelHtml += `<span style="background:#fefce8;color:#d97706;font-size:0.65rem;padding:1px 4px;border-radius:3px;font-weight:600;">SLOW</span>`;
+                    otelHtml += `</span>`;
+                    otelHtml += `<span style="color:${durColor};font-weight:700;font-size:0.8rem;">${s.duration_ms.toFixed(0)}ms</span>`;
+                    otelHtml += `</div>`;
+                    otelHtml += `<div style="height:6px;background:#e2e8f0;border-radius:4px;overflow:hidden;"><div style="height:100%;width:${barPct}%;background:${isErr ? '#dc2626' : s.name === 'execute_agent_call' ? '#3b82f6' : s.name.startsWith('metric.') ? '#8b5cf6' : '#64748b'};border-radius:4px;"></div></div>`;
+                    if (s.description) otelHtml += `<div style="font-size:0.68rem;color:#94a3b8;margin-top:1px;">${escapeHtml(s.description)}</div>`;
+                    otelHtml += `</div>`;
+                }
+
+                // Footer explanation
+                otelHtml += `<div style="margin-top:0.5rem;padding:0.4rem 0.6rem;background:#eff6ff;border-radius:6px;font-size:0.72rem;color:#1e40af;display:flex;align-items:center;gap:0.4rem;">`;
+                otelHtml += `<span style="font-size:0.9rem;">&#128161;</span>`;
+                otelHtml += `<span>OpenTelemetry traces every step so you can pinpoint slow calls, failed metrics, and the exact execution flow — like an X-ray for your agent.</span>`;
+                otelHtml += `</div>`;
+
+                otelHtml += `</div>`;
+            }
+
             // --- expected section ---
             let expectedHtml = '';
             if (result.expected) {
@@ -5407,8 +5984,13 @@
                     ${expectedHtml}
                     ${summaryHtml}
                     ${evalHtml}
+                    ${traceHtml}
                     ${trajectoryHtml}
                     ${rubricHtml}
+                    ${rcaHtml}
+                    ${healingHtml}
+                    ${gateHtml}
+                    ${otelHtml}
                 </div>
 
                 <div class="flex gap-1 mt-2">
@@ -5499,6 +6081,7 @@
         function showCreateSuiteModal() {
             document.getElementById('suite-name').value = '';
             document.getElementById('suite-description').value = '';
+            document.getElementById('suite-endpoint').value = '';
             document.getElementById('suite-json-input').value = '';
             openModal('create-suite-modal');
         }
@@ -5525,10 +6108,16 @@
         async function createSuite() {
             const name = document.getElementById('suite-name').value.trim();
             const description = document.getElementById('suite-description').value.trim();
+            const endpoint = document.getElementById('suite-endpoint').value.trim();
             const jsonInput = document.getElementById('suite-json-input').value.trim();
 
             if (!name) {
                 showToast('Please enter a suite name', 'error');
+                return;
+            }
+
+            if (!endpoint) {
+                showToast('Please enter an agent endpoint', 'error');
                 return;
             }
 
@@ -5554,7 +6143,7 @@
                 const response = await fetch(`${API}/api/suites`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, description, tests: initialTests })
+                    body: JSON.stringify({ name, description, endpoint, tests: initialTests })
                 });
 
                 if (!response.ok) {
@@ -5676,6 +6265,10 @@
                 select.innerHTML = '<option value="">-- Select an agent --</option>' +
                     agents.map(a => `<option value="${a.id}" data-endpoint="${a.endpoint}">${escapeHtml(a.name)} ${a.version ? `(${a.version})` : ''}</option>`).join('');
 
+                // Pre-fill endpoint override with suite's configured endpoint
+                const overrideInput = document.getElementById('run-suite-endpoint-override');
+                overrideInput.value = suite.endpoint || '';
+
                 document.getElementById('run-suite-info').textContent = `Suite: ${suite.name} (${suite.test_count} tests)`;
                 openModal('run-suite-modal');
             } catch (error) {
@@ -5686,13 +6279,19 @@
         async function executeRunSuite() {
             const agentSelect = document.getElementById('run-suite-agent');
             const agentId = agentSelect.value;
+            const manualEndpoint = document.getElementById('run-suite-endpoint-override').value.trim();
 
-            if (!agentId) {
-                showToast('Please select an agent', 'error');
+            // Determine endpoint: manual override > agent selection > suite default
+            let endpoint = manualEndpoint;
+            if (!endpoint && agentId) {
+                endpoint = agentSelect.options[agentSelect.selectedIndex].dataset.endpoint;
+            }
+
+            if (!endpoint) {
+                showToast('Please select an agent or enter an endpoint', 'error');
                 return;
             }
 
-            const endpoint = agentSelect.options[agentSelect.selectedIndex].dataset.endpoint;
             const btn = document.getElementById('run-suite-btn');
 
             try {
@@ -5808,11 +6407,27 @@
             const tbody = document.getElementById('history-table');
 
             if (history.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No evaluations found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No evaluations found</td></tr>';
                 return;
             }
 
-            tbody.innerHTML = history.map(h => `
+            tbody.innerHTML = history.map(h => {
+                // Build diagnosis badges
+                let diagBadges = '';
+                if (h.rca_result && h.rca_result.diagnoses && h.rca_result.diagnoses.length > 0) {
+                    const cause = (h.rca_result.diagnoses[0].root_cause || '').replace(/_/g, ' ');
+                    diagBadges += `<span style="font-size:0.65rem;padding:2px 6px;border-radius:4px;background:#fef3c7;color:#92400e;white-space:nowrap;" title="RCA: ${escapeHtml(cause)}">&#128269; ${escapeHtml(cause)}</span> `;
+                }
+                if (h.gate_result) {
+                    const isGo = h.gate_result.decision === 'GO';
+                    diagBadges += `<span style="font-size:0.65rem;padding:2px 6px;border-radius:4px;background:${isGo ? '#dcfce7' : '#fee2e2'};color:${isGo ? '#166534' : '#991b1b'};white-space:nowrap;">${isGo ? '&#128994;' : '&#128308;'} ${escapeHtml(h.gate_result.decision)}</span>`;
+                }
+                if (h.healing_result && h.healing_result.healed) {
+                    diagBadges += ` <span style="font-size:0.65rem;padding:2px 6px;border-radius:4px;background:#dcfce7;color:#166534;white-space:nowrap;">&#9989; healed</span>`;
+                }
+                if (!diagBadges) diagBadges = '<span class="text-muted" style="font-size:0.7rem;">—</span>';
+
+                return `
                 <tr class="clickable-row" onclick="viewResultDetail('${h.id}')">
                     <td class="text-muted">${formatDate(h.created_at)}</td>
                     <td>${escapeHtml((h.input || '').substring(0, 40))}${(h.input || '').length > 40 ? '...' : ''}</td>
@@ -5823,9 +6438,10 @@
                             ${h.passed ? 'PASS' : 'FAIL'}
                         </span>
                     </td>
+                    <td style="max-width:180px;">${diagBadges}</td>
                     <td>${h.latency_ms || 0}ms</td>
-                </tr>
-            `).join('');
+                </tr>`;
+            }).join('');
         }
 
         // Load analytics
@@ -6220,6 +6836,83 @@
 
                     ${trajectoryHtml}
                     ${rubricHtml}
+
+                    ${r.rca_result && r.rca_result.diagnoses && r.rca_result.diagnoses.length > 0 ? `
+                    <div class="result-detail-section">
+                        <h4>&#128269; Root Cause Analysis</h4>
+                        ${r.rca_result.diagnoses.map(d => `
+                            <div style="margin-bottom:0.7rem; padding:0.6rem 0.75rem; background:var(--bg); border-radius:6px; border-left:3px solid #f59e0b;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.3rem;">
+                                    <strong style="font-size:0.85rem;">${escapeHtml((d.root_cause || '').replace(/_/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase()))}</strong>
+                                    <span style="font-size:0.75rem; padding:2px 8px; border-radius:10px; background:${d.confidence >= 0.7 ? '#dcfce7' : '#fef3c7'}; color:${d.confidence >= 0.7 ? '#166534' : '#92400e'};">${Math.round((d.confidence || 0) * 100)}% confidence</span>
+                                </div>
+                                ${(d.evidence || []).map(e => `<div style="font-size:0.8rem; color:var(--text-light); margin-top:0.2rem; padding-left:0.5rem; border-left:2px solid #e2e8f0;">${escapeHtml(e)}</div>`).join('')}
+                                ${d.recommendation ? `<div style="font-size:0.8rem; margin-top:0.4rem; padding:0.4rem 0.6rem; background:#eff6ff; border-radius:4px; color:#1e40af;"><strong>Fix:</strong> ${escapeHtml(d.recommendation)}</div>` : ''}
+                            </div>
+                        `).join('')}
+                        ${r.rca_result.summary ? `<div style="font-size:0.82rem; color:var(--text-light); margin-top:0.3rem; font-style:italic;">${escapeHtml(r.rca_result.summary)}</div>` : ''}
+                    </div>` : ''}
+
+                    ${r.healing_result ? `
+                    <div class="result-detail-section">
+                        <h4>${r.healing_result.healed ? '&#9989;' : '&#9888;&#65039;'} Self-Healing Result</h4>
+                        <div style="display:flex; gap:0.5rem; margin-bottom:0.5rem; align-items:center;">
+                            <span class="badge ${r.healing_result.healed ? 'badge-success' : 'badge-danger'}" style="font-size:0.8rem;">
+                                ${r.healing_result.healed ? 'HEALED' : 'NOT HEALED'}
+                            </span>
+                            <span class="text-muted" style="font-size:0.78rem;">${r.healing_result.total_variants_tested || 0} variants tested</span>
+                        </div>
+                        ${(r.healing_result.recommendations || []).map(rec => `
+                            <div style="margin-bottom:0.5rem; padding:0.5rem 0.75rem; background:var(--bg); border-radius:6px; border-left:3px solid ${rec.requires_manual_review ? '#ef4444' : '#22c55e'};">
+                                <div style="font-size:0.82rem;"><strong>${escapeHtml((rec.fix_type || '').replace(/_/g, ' '))}</strong></div>
+                                ${rec.best_variant ? `<div style="font-size:0.78rem; color:var(--text-light); margin-top:0.2rem;">Best variant: <code style="font-size:0.75rem;">${escapeHtml(JSON.stringify(rec.best_variant))}</code></div>` : ''}
+                                ${rec.improvement ? `<div style="font-size:0.78rem; margin-top:0.2rem; color:#16a34a;">${Object.entries(rec.improvement).map(([k,v]) => escapeHtml(k) + ': ' + escapeHtml(String(v))).join(', ')}</div>` : ''}
+                                ${rec.recommendation ? `<div style="font-size:0.8rem; margin-top:0.3rem;">${escapeHtml(rec.recommendation)}</div>` : ''}
+                            </div>
+                        `).join('')}
+                        ${r.healing_result.summary ? `<div style="font-size:0.82rem; color:var(--text-light); font-style:italic;">${escapeHtml(r.healing_result.summary)}</div>` : ''}
+                    </div>` : ''}
+
+                    ${r.gate_result ? `
+                    <div class="result-detail-section">
+                        <h4>${r.gate_result.decision === 'GO' ? '&#128994;' : '&#128308;'} Deployment Gate</h4>
+                        <div style="display:flex; gap:0.5rem; margin-bottom:0.5rem; align-items:center;">
+                            <span class="badge ${r.gate_result.decision === 'GO' ? 'badge-success' : 'badge-danger'}" style="font-size:0.9rem; padding:6px 14px;">
+                                ${escapeHtml(r.gate_result.decision || 'UNKNOWN')}
+                            </span>
+                            <span style="font-size:0.85rem; font-weight:600;">Score: ${((r.gate_result.final_score || 0) * 100).toFixed(0)}%</span>
+                            <span class="text-muted" style="font-size:0.78rem;">threshold: ${((r.gate_result.threshold || 0.7) * 100).toFixed(0)}%</span>
+                        </div>
+                        ${r.gate_result.score_breakdown ? `
+                        <div style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                            ${Object.entries(r.gate_result.score_breakdown).map(([k, v]) => `
+                                <span style="font-size:0.75rem; padding:3px 8px; border-radius:4px; background:#e2e8f0; color:#334155;">${escapeHtml(k)}: ${(v * 100).toFixed(0)}%</span>
+                            `).join('')}
+                        </div>` : ''}
+                        ${r.gate_result.recommended_action ? `<div style="font-size:0.82rem; padding:0.4rem 0.6rem; background:${r.gate_result.decision === 'GO' ? '#f0fdf4' : '#fef2f2'}; border-radius:4px; color:${r.gate_result.decision === 'GO' ? '#166534' : '#991b1b'};">${escapeHtml(r.gate_result.recommended_action)}</div>` : ''}
+                    </div>` : ''}
+
+                    ${r.otel_spans && r.otel_spans.length > 0 ? `
+                    <div class="result-detail-section">
+                        <h4>&#9201; Performance Timeline</h4>
+                        <div style="display:flex; flex-direction:column; gap:0.25rem;">
+                            ${r.otel_spans.map(s => {
+                                const durColor = s.duration_ms > 5000 ? '#dc2626' : s.duration_ms > 1000 ? '#d97706' : '#16a34a';
+                                const isError = s.status === 'ERROR';
+                                const totalDur = Math.max(...r.otel_spans.map(x => x.duration_ms), 1);
+                                const barPct = Math.max((s.duration_ms / totalDur) * 100, 3);
+                                return `<div style="padding:0.25rem 0;">
+                                    <div style="display:flex; justify-content:space-between; font-size:0.78rem; margin-bottom:2px;">
+                                        <span><strong>${escapeHtml(s.name)}</strong>${isError ? ' <span style="color:#dc2626;">ERROR</span>' : ''}${s.description ? ` <span class="text-muted" style="font-size:0.72rem;">— ${escapeHtml(s.description)}</span>` : ''}</span>
+                                        <span style="color:${durColor}; font-weight:600;">${s.duration_ms.toFixed(0)}ms</span>
+                                    </div>
+                                    <div style="height:6px; background:#e2e8f0; border-radius:3px;">
+                                        <div style="height:100%; width:${barPct}%; background:${isError ? '#dc2626' : '#3b82f6'}; border-radius:3px;"></div>
+                                    </div>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                    </div>` : ''}
                 `;
             } catch (error) {
                 content.innerHTML = `<div style="padding:1rem; background:#fee2e2; border-radius:6px; color:var(--danger);">
@@ -8316,6 +9009,8 @@
         function displayChainResults(result) {
             const container = document.getElementById('chain-results');
             const content = document.getElementById('chain-results-content');
+            const placeholder = document.getElementById('chain-result-placeholder');
+            if (placeholder) placeholder.style.display = 'none';
 
             const stepsHtml = result.step_results.map((step, i) => {
                 const uid = 'cs_' + i + '_' + Date.now();
@@ -8391,9 +9086,14 @@
             const totalSteps = result.step_results.length;
             const passedSteps = result.step_results.filter(s => s.success).length;
             const scoredSteps = result.step_results.filter(s => s.score != null);
-            const avgScore = scoredSteps.length > 0
-                ? Math.round(scoredSteps.reduce((a, s) => a + s.score, 0) / scoredSteps.length)
-                : null;
+            const avgScore = result.avg_score != null ? Math.round(result.avg_score)
+                : (scoredSteps.length > 0
+                    ? Math.round(scoredSteps.reduce((a, s) => a + s.score, 0) / scoredSteps.length)
+                    : null);
+            const threshold = result.threshold || 70;
+            const chainPassed = result.passed != null ? result.passed : (avgScore != null && avgScore >= threshold);
+            const passLabel = chainPassed ? 'PASS' : 'FAIL';
+            const passClass = chainPassed ? 'badge-pass' : 'badge-fail';
             const routingHtml = result.routing_accuracy != null
                 ? `<span class="chain-summary-stat has-tooltip" data-tip="Expected agent routing accuracy">Routing: <strong>${Math.round(result.routing_accuracy)}%</strong></span>`
                 : '';
@@ -8422,6 +9122,7 @@
                     <span class="chain-summary-stat">Steps: <strong>${passedSteps}/${totalSteps} passed</strong></span>
                     <span class="chain-summary-stat">Latency: <strong>${result.total_latency_ms}ms</strong></span>
                     ${avgScore != null ? `<span class="chain-summary-stat">Avg Score: <strong>${avgScore}/100</strong></span>` : ''}
+                    ${avgScore != null ? `<span class="badge ${passClass}" style="font-size:0.78rem;">${passLabel}</span>` : ''}
                     ${routingHtml}
                 </div>
                 ${scorecardHtml}
@@ -9825,8 +10526,7 @@
                 qsState.endpoint = ep;
             }
             if (currentStep === 2) {
-                const source = document.querySelector('input[name="qs-test-source"]:checked')?.value || 'sample';
-                qsState.testSource = source;
+                const source = qsState.testSource || 'sample';
                 if (source === 'suite') {
                     const sel = document.getElementById('qs-suite-select');
                     if (!sel.value) { showToast('Please select a test suite', 'warning'); return; }
@@ -9854,7 +10554,8 @@
 
         function qsUseSampleAgent() {
             document.getElementById('qs-endpoint').value = 'http://localhost:8010/chat';
-            document.getElementById('qs-conn-status').textContent = '';
+            document.getElementById('qs-conn-status').textContent = 'Click to verify';
+            document.getElementById('qs-test-icon').innerHTML = '&#128268;';
             showToast('Travel Demo endpoint loaded', 'success');
         }
 
@@ -9862,10 +10563,12 @@
             const ep = document.getElementById('qs-endpoint').value.trim();
             if (!ep) return;
             const status = document.getElementById('qs-conn-status');
+            const icon = document.getElementById('qs-test-icon');
             const btn = document.getElementById('qs-test-btn');
-            btn.disabled = true;
             btn.textContent = 'Testing...';
-            status.textContent = '';
+            icon.innerHTML = '&#9203;';
+            status.textContent = 'Connecting...';
+            status.style.color = '#64748b';
             try {
                 const resp = await fetch(`${API}/api/test-connection`, {
                     method: 'POST',
@@ -9873,14 +10576,49 @@
                     body: JSON.stringify({ endpoint: ep })
                 });
                 const data = await resp.json();
-                status.textContent = data.success ? '✓ Connected' : '✗ Failed';
-                status.style.color = data.success ? 'var(--success)' : 'var(--danger)';
+                if (data.success) {
+                    icon.innerHTML = '&#9989;';
+                    status.textContent = 'Connected!';
+                    status.style.color = 'var(--success)';
+                } else {
+                    icon.innerHTML = '&#10060;';
+                    status.textContent = 'Not reachable';
+                    status.style.color = 'var(--danger)';
+                }
             } catch {
-                status.textContent = '✗ Error';
+                icon.innerHTML = '&#10060;';
+                status.textContent = 'Connection error';
                 status.style.color = 'var(--danger)';
             } finally {
-                btn.disabled = false;
                 btn.textContent = 'Test Connection';
+            }
+        }
+
+        // Card-based test source selection (replaces radio buttons)
+        function qsSelectTestSource(source) {
+            qsState.testSource = source;
+            const sampleCard = document.getElementById('qs-test-card-sample');
+            const suiteCard = document.getElementById('qs-test-card-suite');
+            const sampleCheck = document.getElementById('qs-sample-check');
+            const suiteCheck = document.getElementById('qs-suite-check');
+            const suitePicker = document.getElementById('qs-suite-picker');
+
+            if (source === 'sample') {
+                sampleCard.style.border = '2px solid #dc2626';
+                sampleCard.style.background = '#fef2f2';
+                suiteCard.style.border = '2px solid #e2e8f0';
+                suiteCard.style.background = '#fafafa';
+                sampleCheck.style.display = 'inline';
+                suiteCheck.style.display = 'none';
+                suitePicker.style.display = 'none';
+            } else {
+                suiteCard.style.border = '2px solid #dc2626';
+                suiteCard.style.background = '#fef2f2';
+                sampleCard.style.border = '2px solid #e2e8f0';
+                sampleCard.style.background = '#fafafa';
+                suiteCheck.style.display = 'inline';
+                sampleCheck.style.display = 'none';
+                suitePicker.style.display = 'block';
             }
         }
 
@@ -9901,21 +10639,68 @@
             if (!grid) return;
             try {
                 const resp = await fetch(`${API}/api/metrics`);
-                const data = resp.ok ? await resp.json() : {};
-                const metrics = data.metrics || Object.keys(data);
-                const recommended = ['answer_relevancy', 'task_completion', 'faithfulness', 'hallucination'];
-                grid.innerHTML = metrics.map(m => {
-                    const checked = recommended.includes(m) ? 'checked' : '';
-                    return `<label style="font-size:0.8rem; display:flex; align-items:center; gap:0.35rem; cursor:pointer;">
-                        <input type="checkbox" value="${m}" ${checked}> ${formatMetricName(m)}
+                const data = resp.ok ? await resp.json() : [];
+
+                // API returns [{id, name, description, requires}, ...] — extract metric objects
+                const metricList = Array.isArray(data) ? data : (data.metrics || []);
+                if (metricList.length === 0) {
+                    grid.innerHTML = '<p class="text-muted" style="font-size:0.8rem;">No metrics available</p>';
+                    return;
+                }
+
+                const recommended = ['answer_relevancy', 'task_completion', 'faithfulness', 'toxicity'];
+
+                // Show only curated core metrics in Quick Start (keep it simple)
+                const coreIds = new Set([
+                    'answer_relevancy', 'toxicity', 'task_completion', 'faithfulness',
+                    'contextual_relevancy', 'similarity', 'hallucination',
+                    'ragas_faithfulness', 'ragas_context_precision', 'ragas_context_recall',
+                    'ragas_answer_correctness', 'coherence', 'tool_correctness',
+                ]);
+
+                const coreMetrics = metricList.filter(m => coreIds.has(m.id));
+                const advMetrics = metricList.filter(m => !coreIds.has(m.id));
+
+                let html = '';
+                for (const m of coreMetrics) {
+                    const checked = recommended.includes(m.id) ? 'checked' : '';
+                    const isRec = recommended.includes(m.id);
+                    html += `<label style="font-size:0.8rem; display:flex; align-items:center; gap:0.35rem; cursor:pointer; padding:0.25rem 0.4rem; border-radius:6px; ${isRec ? 'background:#eff6ff;border:1px solid #bfdbfe;' : 'border:1px solid transparent;'}" title="${escapeHtml(m.description || m.id)}">
+                        <input type="checkbox" value="${m.id}" ${checked}>
+                        <span>${escapeHtml(m.name || formatMetricName(m.id))}${isRec ? ' <span style="font-size:0.6rem;color:#3b82f6;">&#11088;</span>' : ''}</span>
                     </label>`;
-                }).join('');
-                qsState.metrics = recommended.filter(m => metrics.includes(m));
-            } catch { grid.innerHTML = '<p class="text-muted" style="font-size:0.8rem;">Could not load metrics</p>'; }
+                }
+
+                // Expandable advanced section
+                if (advMetrics.length > 0) {
+                    html += `<div style="grid-column:1/-1;margin-top:0.3rem;border-top:1px dashed #d1d5db;padding-top:0.3rem;">
+                        <div style="cursor:pointer;font-size:0.72rem;color:var(--primary);font-weight:600;display:flex;align-items:center;gap:0.3rem;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'grid':'none'; this.querySelector('span').style.transform=this.nextElementSibling.style.display==='none'?'':'rotate(90deg)'">
+                            <span style="transition:transform .2s;display:inline-block;">&#9654;</span>
+                            ${advMetrics.length} more metrics
+                        </div>
+                        <div style="display:none;grid-template-columns:1fr 1fr;gap:0.35rem;margin-top:0.3rem;">`;
+                    for (const m of advMetrics) {
+                        html += `<label style="font-size:0.78rem; display:flex; align-items:center; gap:0.35rem; cursor:pointer; padding:0.2rem 0.3rem; border-radius:4px;" title="${escapeHtml(m.description || m.id)}">
+                            <input type="checkbox" value="${m.id}">
+                            <span style="color:#64748b;">${escapeHtml(m.name || formatMetricName(m.id))}</span>
+                        </label>`;
+                    }
+                    html += `</div></div>`;
+                }
+
+                grid.innerHTML = html;
+
+                // Track recommended as initially selected
+                const allIds = metricList.map(m => m.id);
+                qsState.metrics = recommended.filter(m => allIds.includes(m));
+            } catch (e) {
+                console.error('qsLoadMetrics error:', e);
+                grid.innerHTML = '<p class="text-muted" style="font-size:0.8rem;">Could not load metrics</p>';
+            }
         }
 
         function qsSelectRecommended() {
-            const recommended = ['answer_relevancy', 'task_completion', 'faithfulness', 'hallucination'];
+            const recommended = ['answer_relevancy', 'task_completion', 'faithfulness', 'toxicity'];
             document.querySelectorAll('#qs-metrics-grid input[type=checkbox]').forEach(cb => {
                 cb.checked = recommended.includes(cb.value);
             });
@@ -9929,25 +10714,19 @@
             document.querySelectorAll('#qs-metrics-grid input[type=checkbox]').forEach(cb => cb.checked = false);
         }
 
-        function qsToggleTestSource() {
-            const source = document.querySelector('input[name="qs-test-source"]:checked')?.value;
-            const picker = document.getElementById('qs-suite-picker');
-            if (picker) picker.style.display = source === 'suite' ? 'block' : 'none';
-        }
-
         function qsBuildSummary() {
             const card = document.getElementById('qs-summary-card');
             const testDesc = qsState.testSource === 'sample'
                 ? '5 sample travel queries'
                 : (qsState.suiteName || 'Selected suite');
             card.innerHTML = `
-                <div style="display:grid; grid-template-columns:auto 1fr; gap:0.4rem 0.75rem; align-items:start;">
-                    <span style="color:var(--text-light); font-size:0.78rem;">Agent</span>
-                    <span style="word-break:break-all;">${escapeHtml(qsState.endpoint)}</span>
-                    <span style="color:var(--text-light); font-size:0.78rem;">Tests</span>
-                    <span>${escapeHtml(testDesc)}</span>
-                    <span style="color:var(--text-light); font-size:0.78rem;">Metrics</span>
-                    <span>${qsState.metrics.map(m => `<span class="badge" style="margin-right:3px;">${formatMetricName(m)}</span>`).join('')}</span>
+                <div style="display:grid; grid-template-columns:auto 1fr; gap:0.5rem 0.75rem; align-items:start;">
+                    <span style="color:#64748b; font-size:0.78rem; font-weight:600;">&#127919; Agent</span>
+                    <span style="word-break:break-all; font-size:0.85rem; font-family:monospace; background:#f1f5f9; padding:2px 6px; border-radius:4px;">${escapeHtml(qsState.endpoint)}</span>
+                    <span style="color:#64748b; font-size:0.78rem; font-weight:600;">&#128221; Tests</span>
+                    <span style="font-size:0.85rem;">${escapeHtml(testDesc)}</span>
+                    <span style="color:#64748b; font-size:0.78rem; font-weight:600;">&#128200; Metrics</span>
+                    <div style="display:flex;flex-wrap:wrap;gap:0.25rem;">${qsState.metrics.map(m => `<span style="font-size:0.72rem;padding:2px 8px;background:#dbeafe;color:#1e40af;border-radius:10px;font-weight:500;">${formatMetricName(m)}</span>`).join('')}</div>
                 </div>`;
             document.getElementById('qs-result').style.display = 'none';
             document.getElementById('qs-run-actions').style.display = 'flex';
@@ -10046,8 +10825,11 @@
         function qsReset() {
             qsState = { step: 1, endpoint: 'http://localhost:8003/chat', testSource: 'sample', suiteId: null, metrics: [] };
             document.getElementById('qs-endpoint').value = qsState.endpoint;
-            document.getElementById('qs-conn-status').textContent = '';
+            document.getElementById('qs-conn-status').textContent = 'Click to verify';
+            document.getElementById('qs-test-icon').innerHTML = '&#128268;';
             document.getElementById('qs-result').style.display = 'none';
+            // Reset test source cards to default (sample selected)
+            qsSelectTestSource('sample');
             const actions = document.getElementById('qs-run-actions');
             if (actions) actions.innerHTML = `
                 <button class="btn btn-secondary" onclick="qsBack(4)">&#8592; Back</button>
@@ -10419,6 +11201,261 @@
         document.getElementById('weval-step-results').style.display = 'none';
         document.getElementById('weval-validation-msg').style.display = 'none';
         wevalSwitchTab('paste');
+    }
+
+    // =====================================================
+    // === TRACES VIEWER (Enhanced with user-friendly OpenTelemetry visuals) ===
+    // =========================================================================
+
+    function getSpanIcon(span) {
+        if (span.status === 'ERROR') return '&#10060;';
+        if (span.name === 'evaluate_test') return '&#128196;';
+        if (span.name === 'execute_agent_call') return '&#128640;';
+        if (span.name.startsWith('metric.')) {
+            if (span.attributes && span.attributes['metric.passed'] === true) return '&#9989;';
+            if (span.attributes && span.attributes['metric.passed'] === false) return '&#10060;';
+            return '&#128200;';
+        }
+        return '&#128312;';
+    }
+
+    function getSpanColor(span) {
+        if (span.status === 'ERROR') return '#dc2626';
+        if (span.name === 'execute_agent_call') return '#3b82f6';
+        if (span.name === 'evaluate_test') return '#6366f1';
+        if (span.name.startsWith('metric.')) {
+            if (span.attributes && span.attributes['metric.passed'] === true) return '#16a34a';
+            if (span.attributes && span.attributes['metric.passed'] === false) return '#dc2626';
+            return '#8b5cf6';
+        }
+        return '#64748b';
+    }
+
+    function getSpanLabel(span) {
+        if (span.description) return span.description;
+        if (span.name === 'evaluate_test') return 'Full evaluation run';
+        if (span.name === 'execute_agent_call') return 'Agent HTTP call';
+        if (span.name.startsWith('metric.')) return 'Metric: ' + span.name.substring(7).replace(/_/g, ' ');
+        return span.name;
+    }
+
+    function getDurationBadge(ms) {
+        let color = '#16a34a'; let bg = '#f0fdf4'; let label = 'Fast';
+        if (ms > 5000) { color = '#dc2626'; bg = '#fef2f2'; label = 'Slow'; }
+        else if (ms > 2000) { color = '#d97706'; bg = '#fefce8'; label = 'Moderate'; }
+        return `<span style="font-size:0.75rem; padding:0.15rem 0.5rem; border-radius:12px; background:${bg}; color:${color}; font-weight:600;">${ms.toFixed(0)}ms ${label}</span>`;
+    }
+
+    function getTraceStatusSummary(trace) {
+        let passed = 0, failed = 0, total = 0;
+        for (const s of trace.spans) {
+            if (s.name.startsWith('metric.')) {
+                total++;
+                if (s.attributes && s.attributes['metric.passed'] === true) passed++;
+                else if (s.attributes && s.attributes['metric.passed'] === false) failed++;
+            }
+        }
+        if (total === 0) return '';
+        return `<span style="font-size:0.78rem; margin-left:0.5rem;">`
+            + (passed > 0 ? `<span style="color:#16a34a; font-weight:600;">&#9989; ${passed} passed</span> ` : '')
+            + (failed > 0 ? `<span style="color:#dc2626; font-weight:600;">&#10060; ${failed} failed</span>` : '')
+            + `</span>`;
+    }
+
+    async function loadTraces() {
+        const container = document.getElementById('traces-list');
+        const status = document.getElementById('traces-status');
+        const countEl = document.getElementById('traces-count');
+        container.innerHTML = '<p class="text-muted text-center">Loading traces...</p>';
+        try {
+            const resp = await fetch('/api/traces?limit=50');
+            const data = await resp.json();
+            if (data.info) {
+                status.innerHTML = `<div style="background:#fefce8; border:1px solid #fde68a; border-radius:8px; padding:0.75rem 1rem; font-size:0.85rem; display:flex; align-items:center; gap:0.5rem;">
+                    <span style="font-size:1.2rem;">&#9888;&#65039;</span>
+                    <div><strong>Tracing Not Active</strong><br><span style="color:#64748b;">${data.info}</span></div>
+                </div>`;
+                container.innerHTML = '';
+                countEl.textContent = '';
+                return;
+            }
+            status.innerHTML = '';
+            if (!data.traces || data.traces.length === 0) {
+                countEl.textContent = '';
+                container.innerHTML = `<div style="text-align:center; padding:3rem 1rem;">
+                    <div style="font-size:3rem; margin-bottom:0.75rem;">&#128301;</div>
+                    <h4 style="margin:0 0 0.5rem; color:var(--text);">No Traces Yet</h4>
+                    <p class="text-muted" style="font-size:0.85rem; max-width:400px; margin:0 auto;">
+                        Run an evaluation from the <strong>Evaluate Agent</strong> tab and traces will appear here automatically — showing every step with timing.
+                    </p>
+                </div>`;
+                return;
+            }
+
+            countEl.textContent = `(${data.traces.length} trace${data.traces.length !== 1 ? 's' : ''})`;
+
+            let html = '<div style="display:flex; flex-direction:column; gap:0.6rem;">';
+            for (const t of data.traces) {
+                const ts = new Date(t.start_time * 1000).toLocaleString();
+                const spanCount = t.span_count || t.spans.length;
+                const dur = t.total_duration_ms;
+                const statusSummary = getTraceStatusSummary(t);
+
+                // Build mini waterfall preview
+                const maxDur = Math.max(...t.spans.map(s => s.duration_ms), 1);
+                let waterfallHtml = '<div style="display:flex; gap:2px; align-items:center; flex-wrap:wrap;">';
+                for (const span of t.spans) {
+                    const pct = Math.max((span.duration_ms / maxDur) * 100, 10);
+                    const color = getSpanColor(span);
+                    const icon = getSpanIcon(span);
+                    waterfallHtml += `<div title="${escapeHtml(getSpanLabel(span))}: ${span.duration_ms.toFixed(0)}ms" style="height:8px; width:${pct}%; min-width:8px; background:${color}; border-radius:4px; opacity:0.85; cursor:help;"></div>`;
+                }
+                waterfallHtml += '</div>';
+
+                html += `<div class="card" style="padding:0.85rem 1.1rem; cursor:pointer; transition:all .15s; border-left:4px solid ${dur > 5000 ? '#dc2626' : dur > 2000 ? '#f59e0b' : '#16a34a'};"
+                    onclick="showTraceDetail('${t.trace_id}')"
+                    onmouseover="this.style.boxShadow='0 2px 12px rgba(0,0,0,0.1)'; this.style.transform='translateY(-1px)'"
+                    onmouseout="this.style.boxShadow=''; this.style.transform=''">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.4rem;">
+                        <div style="display:flex; align-items:center; gap:0.4rem; flex-wrap:wrap;">
+                            <strong style="font-size:0.92rem;">${escapeHtml(t.name || 'Evaluation Run')}</strong>
+                            <span style="background:var(--bg); padding:0.1rem 0.5rem; border-radius:12px; font-size:0.72rem; color:var(--text-light); border:1px solid var(--border);">${spanCount} step${spanCount!==1?'s':''}</span>
+                            ${statusSummary}
+                        </div>
+                        <div style="text-align:right; flex-shrink:0;">
+                            ${getDurationBadge(dur)}
+                        </div>
+                    </div>
+                    ${waterfallHtml}
+                    <div style="margin-top:0.35rem; font-size:0.75rem; color:var(--text-light);">&#128339; ${ts}</div>
+                </div>`;
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = `<div style="text-align:center; padding:2rem;"><p style="color:var(--danger);">&#9888;&#65039; Failed to load traces: ${e.message}</p></div>`;
+        }
+    }
+
+    async function showTraceDetail(traceId) {
+        const title = document.getElementById('trace-detail-title');
+        const body = document.getElementById('trace-detail-body');
+        title.innerHTML = '&#128301; Trace Detail';
+        body.innerHTML = '<p class="text-muted text-center" style="padding:1rem;">Loading trace...</p>';
+        openModal('trace-detail-modal');
+        try {
+            const resp = await fetch(`/api/traces/${traceId}`);
+            const t = await resp.json();
+            if (t.error) { body.innerHTML = `<p style="color:var(--danger);">${t.error}</p>`; return; }
+
+            // Summary cards
+            let passed = 0, failed = 0, metricCount = 0;
+            for (const s of t.spans) {
+                if (s.name.startsWith('metric.')) {
+                    metricCount++;
+                    if (s.attributes && s.attributes['metric.passed'] === true) passed++;
+                    else if (s.attributes && s.attributes['metric.passed'] === false) failed++;
+                }
+            }
+
+            let html = `
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:0.6rem; margin-bottom:1.25rem;">
+                <div style="background:#f0f9ff; border:1px solid #bfdbfe; border-radius:8px; padding:0.6rem 0.8rem; text-align:center;">
+                    <div style="font-size:1.3rem; font-weight:700; color:#1e40af;">${t.total_duration_ms.toFixed(0)}ms</div>
+                    <div style="font-size:0.72rem; color:#64748b; font-weight:500;">Total Duration</div>
+                </div>
+                <div style="background:#f8fafc; border:1px solid var(--border); border-radius:8px; padding:0.6rem 0.8rem; text-align:center;">
+                    <div style="font-size:1.3rem; font-weight:700; color:var(--text);">${t.spans.length}</div>
+                    <div style="font-size:0.72rem; color:#64748b; font-weight:500;">Total Steps</div>
+                </div>
+                ${metricCount > 0 ? `
+                <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:0.6rem 0.8rem; text-align:center;">
+                    <div style="font-size:1.3rem; font-weight:700; color:#16a34a;">${passed}</div>
+                    <div style="font-size:0.72rem; color:#64748b; font-weight:500;">Metrics Passed</div>
+                </div>
+                <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:8px; padding:0.6rem 0.8rem; text-align:center;">
+                    <div style="font-size:1.3rem; font-weight:700; color:#dc2626;">${failed}</div>
+                    <div style="font-size:0.72rem; color:#64748b; font-weight:500;">Metrics Failed</div>
+                </div>` : ''}
+            </div>
+
+            <div style="margin-bottom:0.4rem; display:flex; justify-content:space-between; align-items:center;">
+                <h4 style="margin:0;">&#128295; Step-by-Step Breakdown</h4>
+                <span class="text-muted" style="font-size:0.75rem;">&#128339; ${new Date(t.start_time * 1000).toLocaleString()}</span>
+            </div>
+            <p style="font-size:0.78rem; color:#64748b; margin:0 0 0.75rem;">Each bar shows when a step started and how long it took. Longer bars = slower steps.</p>`;
+
+            // Waterfall timeline
+            const traceStart = Math.min(...t.spans.map(s => s.start_time));
+            const traceEnd = Math.max(...t.spans.map(s => s.end_time));
+            const totalRange = traceEnd - traceStart || 1;
+
+            html += '<div style="display:flex; flex-direction:column; gap:0.15rem;">';
+            for (let i = 0; i < t.spans.length; i++) {
+                const span = t.spans[i];
+                const offsetPct = ((span.start_time - traceStart) / totalRange) * 100;
+                const widthPct = Math.max(((span.end_time - span.start_time) / totalRange) * 100, 3);
+                const barColor = getSpanColor(span);
+                const icon = getSpanIcon(span);
+                const label = getSpanLabel(span);
+                const isError = span.status === 'ERROR';
+                const isSlow = span.duration_ms > 2000;
+
+                html += `<div style="padding:0.5rem 0.6rem; border-radius:6px; background:${i % 2 === 0 ? '#f8fafc' : 'white'}; border:1px solid ${isError ? '#fecaca' : 'transparent'};">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.25rem;">
+                        <div style="display:flex; align-items:center; gap:0.4rem; font-size:0.85rem;">
+                            <span>${icon}</span>
+                            <strong style="color:${isError ? '#dc2626' : 'var(--text)'};">${escapeHtml(span.name)}</strong>
+                            ${isError ? '<span style="background:#fef2f2; color:#dc2626; font-size:0.68rem; padding:0.1rem 0.35rem; border-radius:4px; font-weight:600;">ERROR</span>' : ''}
+                            ${isSlow ? '<span style="background:#fefce8; color:#d97706; font-size:0.68rem; padding:0.1rem 0.35rem; border-radius:4px; font-weight:600;">SLOW</span>' : ''}
+                        </div>
+                        <span style="font-size:0.82rem; font-weight:600; color:${span.duration_ms > 3000 ? '#dc2626' : span.duration_ms > 1000 ? '#d97706' : '#16a34a'};">${span.duration_ms.toFixed(0)}ms</span>
+                    </div>
+                    <div style="font-size:0.78rem; color:#64748b; margin-bottom:0.3rem;">${escapeHtml(label)}</div>
+                    <div style="background:#e2e8f0; border-radius:5px; height:12px; position:relative; overflow:hidden;">
+                        <div style="position:absolute; left:${offsetPct}%; width:${widthPct}%; height:100%; background:${barColor}; border-radius:5px; opacity:0.9; transition:opacity .15s;"
+                            onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.9'"></div>
+                    </div>`;
+
+                // Show attributes as readable badges
+                if (span.attributes && Object.keys(span.attributes).length > 0) {
+                    html += '<div style="margin-top:0.35rem; display:flex; gap:0.3rem; flex-wrap:wrap;">';
+                    for (const [k, v] of Object.entries(span.attributes)) {
+                        let badge = 'background:#f1f5f9; color:#475569;';
+                        let displayKey = k.replace('metric.', '').replace('eval.', '').replace(/_/g, ' ');
+                        if (k.includes('score')) badge = 'background:#dcfce7; color:#166534;';
+                        if (k.includes('error')) badge = 'background:#fef2f2; color:#991b1b;';
+                        if (k === 'metric.passed' && v === true) { badge = 'background:#dcfce7; color:#166534;'; displayKey = 'Result'; }
+                        if (k === 'metric.passed' && v === false) { badge = 'background:#fef2f2; color:#991b1b;'; displayKey = 'Result'; }
+                        const displayVal = (k === 'metric.passed') ? (v ? 'Passed &#9989;' : 'Failed &#10060;') : escapeHtml(String(v));
+                        html += `<span style="font-size:0.72rem; padding:0.15rem 0.45rem; border-radius:4px; ${badge}"><strong>${escapeHtml(displayKey)}:</strong> ${displayVal}</span>`;
+                    }
+                    html += '</div>';
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+
+            // Trace ID footer
+            html += `<div style="margin-top:1rem; padding-top:0.6rem; border-top:1px solid var(--border); font-size:0.72rem; color:#94a3b8;">
+                <strong>Trace ID:</strong> ${escapeHtml(traceId)}
+            </div>`;
+
+            body.innerHTML = html;
+        } catch (e) {
+            body.innerHTML = `<p style="color:var(--danger);">&#9888;&#65039; Error loading trace: ${e.message}</p>`;
+        }
+    }
+
+    async function clearTraces() {
+        if (!confirm('Clear all stored traces? This cannot be undone.')) return;
+        try {
+            await fetch('/api/traces', { method: 'DELETE' });
+            document.getElementById('traces-count').textContent = '';
+            loadTraces();
+        } catch (e) {
+            alert('Failed: ' + e.message);
+        }
     }
     </script>
 </body>

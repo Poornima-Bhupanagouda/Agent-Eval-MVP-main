@@ -267,12 +267,27 @@ class Storage:
             "ALTER TABLE results ADD COLUMN trajectory_data TEXT",
             "ALTER TABLE results ADD COLUMN rubric_data TEXT",
             "ALTER TABLE results ADD COLUMN expected TEXT",
+            "ALTER TABLE results ADD COLUMN tool_calls_data TEXT",
+            "ALTER TABLE results ADD COLUMN trace_data TEXT",
+            "ALTER TABLE results ADD COLUMN status TEXT DEFAULT 'evaluated'",
+            "ALTER TABLE results ADD COLUMN evaluated_at TEXT",
+            "ALTER TABLE results ADD COLUMN otel_spans TEXT",
+            "ALTER TABLE results ADD COLUMN rca_result TEXT",
+            "ALTER TABLE results ADD COLUMN healing_result TEXT",
+            "ALTER TABLE results ADD COLUMN gate_result TEXT",
         ]:
             try:
                 conn.execute(migration)
                 conn.commit()
             except Exception:
                 pass  # Column already exists
+
+        # Index for fast pending-artifact lookups
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_results_status ON results(status)")
+            conn.commit()
+        except Exception:
+            pass
 
         conn.close()
 
@@ -400,20 +415,142 @@ class Storage:
         ])
         trajectory_json = json.dumps(result.trajectory_result) if result.trajectory_result else None
         rubric_json = json.dumps(result.rubric_results) if result.rubric_results else None
+        tool_calls_json = json.dumps(result.tool_calls) if result.tool_calls else None
+        trace_json = json.dumps(result.trace) if result.trace else None
+        otel_spans_json = json.dumps(result.otel_spans) if result.otel_spans else None
+        rca_json = json.dumps(result.rca_result) if result.rca_result else None
+        healing_json = json.dumps(result.healing_result) if result.healing_result else None
+        gate_json = json.dumps(result.gate_result) if result.gate_result else None
         conn.execute("""
             INSERT INTO results (id, test_id, suite_id, batch_id, endpoint, input, output,
                                 score, passed, latency_ms, evaluations, created_at,
-                                trajectory_data, rubric_data, expected)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                trajectory_data, rubric_data, expected, tool_calls_data, trace_data,
+                                status, evaluated_at, otel_spans,
+                                rca_result, healing_result, gate_result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             result.id, result.test_id, result.suite_id, result.batch_id,
             result.endpoint, result.input, result.output, result.score,
             1 if result.passed else 0, result.latency_ms, evaluations_json,
-            result.created_at, trajectory_json, rubric_json, result.expected
+            result.created_at, trajectory_json, rubric_json, result.expected,
+            tool_calls_json, trace_json,
+            getattr(result, 'status', 'evaluated'),
+            getattr(result, 'evaluated_at', None),
+            otel_spans_json,
+            rca_json, healing_json, gate_json,
         ))
         conn.commit()
         conn.close()
         return result.id
+
+    def save_pending(self, endpoint: str, input_text: str, output: str,
+                     latency_ms: int, test_id: str = None, suite_id: str = None,
+                     batch_id: str = None, expected: str = None,
+                     tool_calls: list = None, trace: list = None,
+                     trajectory_result: dict = None, rubric_results: list = None) -> str:
+        """
+        Save a raw execution artifact as PENDING (captured but not yet evaluated).
+
+        This is Phase 1 of two-phase evaluation: capture the agent response
+        and all evidence now, evaluate later.
+
+        Returns the result ID for later evaluation.
+        """
+        from agent_eval.core.models import generate_id
+        result_id = generate_id()
+        conn = self._get_conn()
+        conn.execute("""
+            INSERT INTO results (id, test_id, suite_id, batch_id, endpoint, input, output,
+                                score, passed, latency_ms, evaluations, created_at,
+                                trajectory_data, rubric_data, expected, tool_calls_data, trace_data,
+                                status, evaluated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            result_id, test_id, suite_id, batch_id,
+            endpoint, input_text, output, 0.0,
+            0, latency_ms, json.dumps([]),
+            datetime.utcnow().isoformat(),
+            json.dumps(trajectory_result) if trajectory_result else None,
+            json.dumps(rubric_results) if rubric_results else None,
+            expected,
+            json.dumps(tool_calls) if tool_calls else None,
+            json.dumps(trace) if trace else None,
+            "pending", None,
+        ))
+        conn.commit()
+        conn.close()
+        return result_id
+
+    def get_pending(self, limit: int = 100) -> list:
+        """
+        Get all PENDING artifacts (captured but not yet evaluated).
+
+        Returns list of Result objects with status='pending'.
+        """
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT * FROM results WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        conn.close()
+        return [self._row_to_result(row) for row in rows]
+
+    def get_pending_count(self) -> int:
+        """Get count of pending artifacts awaiting evaluation."""
+        conn = self._get_conn()
+        count = conn.execute("SELECT COUNT(*) FROM results WHERE status = 'pending'").fetchone()[0]
+        conn.close()
+        return count
+
+    def update_to_evaluated(self, result_id: str, score: float, passed: bool,
+                            evaluations: list, rca_result: dict = None,
+                            healing_result: dict = None, gate_result: dict = None) -> bool:
+        """
+        Phase 2: Update a PENDING artifact to EVALUATED with scores attached.
+
+        Args:
+            result_id: ID of the pending result to update
+            score: Overall score (0-100)
+            passed: Whether the evaluation passed
+            evaluations: List of EvalMetric objects or dicts
+            rca_result: Optional Root Cause Analysis
+            healing_result: Optional Self-Healing recommendation
+            gate_result: Optional Deployment Gate verdict
+
+        Returns True if updated, False if result not found or not pending.
+        """
+        conn = self._get_conn()
+
+        # Verify it exists and is pending
+        row = conn.execute("SELECT status FROM results WHERE id = ?", (result_id,)).fetchone()
+        if not row:
+            conn.close()
+            return False
+
+        evaluations_json = json.dumps([
+            {"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason,
+             "scored_by": getattr(e, 'scored_by', 'heuristic')}
+            if hasattr(e, 'metric') else e
+            for e in evaluations
+        ])
+
+        rca_json = json.dumps(rca_result) if rca_result else None
+        healing_json = json.dumps(healing_result) if healing_result else None
+        gate_json = json.dumps(gate_result) if gate_result else None
+
+        conn.execute("""
+            UPDATE results
+            SET score = ?, passed = ?, evaluations = ?,
+                status = 'evaluated', evaluated_at = ?,
+                rca_result = ?, healing_result = ?, gate_result = ?
+            WHERE id = ?
+        """, (score, 1 if passed else 0, evaluations_json,
+              datetime.utcnow().isoformat(),
+              rca_json, healing_json, gate_json,
+              result_id))
+        conn.commit()
+        conn.close()
+        return True
 
     def get_history(self, limit: int = 50) -> List[Result]:
         """Get recent evaluation results."""
@@ -422,33 +559,7 @@ class Storage:
             SELECT * FROM results ORDER BY created_at DESC LIMIT ?
         """, (limit,)).fetchall()
 
-        results = []
-        for row in rows:
-            evals_data = json.loads(row["evaluations"]) if row["evaluations"] else []
-            evaluations = [
-                EvalMetric(
-                    metric=e["metric"],
-                    score=e["score"],
-                    passed=e["passed"],
-                    reason=e["reason"],
-                    scored_by=e.get("scored_by", "heuristic")
-                )
-                for e in evals_data
-            ]
-            results.append(Result(
-                id=row["id"],
-                test_id=row["test_id"],
-                suite_id=row["suite_id"],
-                batch_id=row["batch_id"],
-                endpoint=row["endpoint"],
-                input=row["input"],
-                output=row["output"],
-                score=row["score"],
-                passed=bool(row["passed"]),
-                latency_ms=row["latency_ms"],
-                evaluations=evaluations,
-                created_at=row["created_at"],
-            ))
+        results = [self._row_to_result(row) for row in rows]
 
         conn.close()
         return results
@@ -502,33 +613,7 @@ class Storage:
             LIMIT ? OFFSET ?
         """, query_params).fetchall()
 
-        results = []
-        for row in rows:
-            evals_data = json.loads(row["evaluations"]) if row["evaluations"] else []
-            evaluations = [
-                EvalMetric(
-                    metric=e["metric"],
-                    score=e["score"],
-                    passed=e["passed"],
-                    reason=e["reason"],
-                    scored_by=e.get("scored_by", "heuristic")
-                )
-                for e in evals_data
-            ]
-            results.append(Result(
-                id=row["id"],
-                test_id=row["test_id"],
-                suite_id=row["suite_id"],
-                batch_id=row["batch_id"],
-                endpoint=row["endpoint"],
-                input=row["input"],
-                output=row["output"],
-                score=row["score"],
-                passed=bool(row["passed"]),
-                latency_ms=row["latency_ms"],
-                evaluations=evaluations,
-                created_at=row["created_at"],
-            ))
+        results = [self._row_to_result(row) for row in rows]
 
         conn.close()
         return results, total
@@ -635,6 +720,48 @@ class Storage:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        tool_calls_data = None
+        if "tool_calls_data" in keys and row["tool_calls_data"]:
+            try:
+                tool_calls_data = json.loads(row["tool_calls_data"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        trace_data_parsed = None
+        if "trace_data" in keys and row["trace_data"]:
+            try:
+                trace_data_parsed = json.loads(row["trace_data"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        otel_spans_data = None
+        if "otel_spans" in keys and row["otel_spans"]:
+            try:
+                otel_spans_data = json.loads(row["otel_spans"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        rca_data = None
+        if "rca_result" in keys and row["rca_result"]:
+            try:
+                rca_data = json.loads(row["rca_result"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        healing_data = None
+        if "healing_result" in keys and row["healing_result"]:
+            try:
+                healing_data = json.loads(row["healing_result"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        gate_data = None
+        if "gate_result" in keys and row["gate_result"]:
+            try:
+                gate_data = json.loads(row["gate_result"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         # Deserialise evaluations as EvalMetric objects (not raw dicts)
         evals_data = []
         if row["evaluations"]:
@@ -667,6 +794,14 @@ class Storage:
             evaluations=evals_data,
             trajectory_result=trajectory_data,
             rubric_results=rubric_data,
+            tool_calls=tool_calls_data,
+            trace=trace_data_parsed,
+            otel_spans=otel_spans_data,
+            rca_result=rca_data,
+            healing_result=healing_data,
+            gate_result=gate_data,
+            status=row["status"] if "status" in keys else "evaluated",
+            evaluated_at=row["evaluated_at"] if "evaluated_at" in keys else None,
             created_at=row["created_at"],
         )
 

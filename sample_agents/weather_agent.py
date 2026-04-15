@@ -180,6 +180,7 @@ class ChatResponse(BaseModel):
     output: str
     tool_calls: Optional[List[Dict[str, Any]]] = None
     latency_ms: Optional[int] = None
+    trace: Optional[List[Dict[str, Any]]] = None
 
 
 @app.get("/")
@@ -215,38 +216,73 @@ async def describe():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     start = time.time()
-    tool_calls = []
 
-    city = extract_city(request.input)
-    if not city:
-        return ChatResponse(
-            output="I couldn't identify a city in your request. Try asking like: 'What's the weather in Paris?'",
-            tool_calls=[],
-            latency_ms=int((time.time() - start) * 1000),
-        )
+    # --- Pipeline node functions ---
 
-    # Tool 1: Geocode
-    tool_calls.append({"name": "geocode_city", "args": {"city_name": city}})
-    city_info = await geocode_city(city)
+    def parse_input_node(state: dict) -> dict:
+        """Node 1: Extract city name from user query."""
+        city = extract_city(state["query"])
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["city"] = city
+        return state
 
-    if not city_info:
-        return ChatResponse(
-            output=f"Could not find location '{city}'. Please check the city name and try again.",
-            tool_calls=tool_calls,
-            latency_ms=int((time.time() - start) * 1000),
-        )
+    async def geocode_node(state: dict) -> dict:
+        """Node 2: Geocode the city to lat/lon."""
+        city = state["intermediate"].get("city")
+        state = dict(state)
+        state["tool_calls"] = list(state.get("tool_calls", []))
+        if not city:
+            state["output"] = "I couldn't identify a city in your request. Try asking like: 'What's the weather in Paris?'"
+            return state
+        state["tool_calls"].append({"name": "geocode_city", "args": {"city_name": city}})
+        city_info = await geocode_city(city)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["city_info"] = city_info
+        if not city_info:
+            state["output"] = f"Could not find location '{city}'. Please check the city name and try again."
+        return state
 
-    # Tool 2: Forecast
-    tool_calls.append({
-        "name": "get_forecast",
-        "args": {"latitude": city_info["latitude"], "longitude": city_info["longitude"]},
-    })
-    forecast_data = await get_forecast(city_info["latitude"], city_info["longitude"])
+    async def forecast_node(state: dict) -> dict:
+        """Node 3: Fetch the weather forecast."""
+        city_info = state["intermediate"].get("city_info")
+        state = dict(state)
+        if not city_info or state.get("output"):
+            return state  # skip if earlier node already set output (error)
+        state["tool_calls"] = list(state.get("tool_calls", []))
+        state["tool_calls"].append({
+            "name": "get_forecast",
+            "args": {"latitude": city_info["latitude"], "longitude": city_info["longitude"]},
+        })
+        forecast_data = await get_forecast(city_info["latitude"], city_info["longitude"])
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["forecast_data"] = forecast_data
+        return state
 
-    output = format_forecast(city_info, forecast_data)
+    def format_node(state: dict) -> dict:
+        """Node 4: Format forecast into natural language."""
+        state = dict(state)
+        if state.get("output"):
+            return state  # already set by error path
+        city_info = state["intermediate"].get("city_info")
+        forecast_data = state["intermediate"].get("forecast_data")
+        if city_info and forecast_data:
+            state["output"] = format_forecast(city_info, forecast_data)
+        return state
+
+    # --- Run steps sequentially ---
+    state = {"query": request.input, "intermediate": {}, "tool_calls": [], "output": "", "errors": []}
+    state = parse_input_node(state)
+    state = await geocode_node(state)
+    state = await forecast_node(state)
+    state = format_node(state)
     latency = int((time.time() - start) * 1000)
 
-    return ChatResponse(output=output, tool_calls=tool_calls, latency_ms=latency)
+    return ChatResponse(
+        output=state.get("output", ""),
+        tool_calls=state.get("tool_calls", []),
+        latency_ms=latency,
+    )
 
 
 def main():

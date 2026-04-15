@@ -7,21 +7,25 @@ A complete multi-agent system that:
 3. Synthesizes findings (Synthesizer Agent)
 4. Optionally reviews quality (Critic Agent)
 
+Uses sequential execution for traceable pipeline.
 Each agent can use a different LLM model based on its role,
 all connected via the LLM Gateway with OAuth2 authentication.
 """
 
 import os
-from typing import Optional, Dict
+import time
+import uuid
+from typing import Optional, Dict, List
 from sample_agents.core.orchestrator import AgentOrchestrator, Agent
 from sample_agents.core.llm_client import LLMClient
-from sample_agents.core.models import WorkflowResult
+from sample_agents.core.models import WorkflowResult, AgentResponse
 from sample_agents.agents.prompts import (
     PLANNER_PROMPT,
     RESEARCHER_PROMPT,
     SYNTHESIZER_PROMPT,
     CRITIC_PROMPT,
 )
+
 
 
 # Default model configurations per agent role
@@ -138,61 +142,104 @@ class ResearchAssistant:
 
     async def research(self, query: str) -> WorkflowResult:
         """
-        Run the full research workflow for a query.
-
-        Args:
-            query: The user's question or research topic
-
-        Returns:
-            WorkflowResult with the final answer and all agent responses
+        Run the full research workflow.
+        Planner → Researcher → Synthesizer (optionally + Critic).
         """
-        # Define agent sequence
         agent_sequence = ["planner", "researcher", "synthesizer"]
-
         if self.include_critic:
             agent_sequence.append("critic")
-
-        # Run workflow
-        result = await self.orchestrator.run_workflow(
-            query=query,
-            agent_sequence=agent_sequence,
-            pass_context=True,
-        )
-
-        return result
+        return await self._run_pipeline_workflow(query, agent_sequence, pass_context=True)
 
     async def quick_answer(self, query: str) -> WorkflowResult:
-        """
-        Get a quick answer using only the synthesizer (single-agent mode).
-
-        Useful for simple queries that don't need full research workflow.
-
-        Args:
-            query: The user's question
-
-        Returns:
-            WorkflowResult with the answer
-        """
-        return await self.orchestrator.run_workflow(
-            query=query,
-            agent_sequence=["synthesizer"],
-            pass_context=False,
-        )
+        """Quick single-agent answer using only the synthesizer."""
+        return await self._run_pipeline_workflow(query, ["synthesizer"], pass_context=False)
 
     async def research_with_review(self, query: str) -> WorkflowResult:
+        """Full research with mandatory critic review."""
+        return await self._run_pipeline_workflow(
+            query, ["planner", "researcher", "synthesizer", "critic"], pass_context=True,
+        )
+
+    async def _run_pipeline_workflow(
+        self, query: str, agent_sequence: List[str], pass_context: bool = True,
+    ) -> WorkflowResult:
         """
-        Run research with mandatory critic review.
-
-        Args:
-            query: The user's question
-
-        Returns:
-            WorkflowResult with reviewed answer
+        Build and run a traced pipeline for the given agent sequence.
+        Each agent in the sequence becomes a node in the pipeline.
         """
-        agent_sequence = ["planner", "researcher", "synthesizer", "critic"]
+        orchestrator = self.orchestrator
+        workflow_id = str(uuid.uuid4())[:8]
 
-        return await self.orchestrator.run_workflow(
+        # Run each agent in sequence
+        state = {"query": query, "intermediate": {}, "tool_calls": [], "output": "", "errors": []}
+
+        for agent_name in agent_sequence:
+            state = dict(state)
+            state["intermediate"] = dict(state.get("intermediate", {}))
+            state["tool_calls"] = list(state.get("tool_calls", []))
+
+            # Build context from previous agents
+            context = None
+            if pass_context:
+                prev_outputs = state["intermediate"].get("accumulated_context", "")
+                if prev_outputs:
+                    context = prev_outputs
+
+            response = await orchestrator.run_agent(
+                agent_name=agent_name,
+                user_input=state["query"],
+                context=context,
+            )
+
+            # Store response
+            responses = list(state["intermediate"].get("agent_responses", []))
+            responses.append({
+                "agent_name": response.agent_name,
+                "agent_role": response.agent_role,
+                "content": response.content,
+                "tokens_used": response.tokens_used,
+                "latency_ms": response.latency_ms,
+                "metadata": response.metadata,
+            })
+            state["intermediate"]["agent_responses"] = responses
+
+            # Track tool call
+            state["tool_calls"].append({
+                "name": "run_agent",
+                "args": {"agent": agent_name, "model": response.metadata.get("model", "")},
+            })
+
+            # Accumulate context
+            if pass_context:
+                acc = state["intermediate"].get("accumulated_context", "")
+                acc += f"\n\n[{agent_name.upper()}]:\n{response.content}"
+                state["intermediate"]["accumulated_context"] = acc
+
+            # Last agent's output becomes the final output
+            state["output"] = response.content
+
+        # --- Convert to WorkflowResult ---
+        raw_responses = state.get("intermediate", {}).get("agent_responses", [])
+        agent_responses = [
+            AgentResponse(
+                agent_name=r["agent_name"],
+                agent_role=r["agent_role"],
+                content=r["content"],
+                tokens_used=r["tokens_used"],
+                latency_ms=r["latency_ms"],
+                metadata=r.get("metadata", {}),
+            )
+            for r in raw_responses
+        ]
+        total_tokens = sum(r.tokens_used for r in agent_responses)
+        total_latency = sum(r.latency_ms for r in agent_responses)
+
+        return WorkflowResult(
+            workflow_id=workflow_id,
             query=query,
-            agent_sequence=agent_sequence,
-            pass_context=True,
+            final_response=result.get("output", ""),
+            agent_responses=agent_responses,
+            total_tokens=total_tokens,
+            total_latency_ms=total_latency,
+            success=True,
         )

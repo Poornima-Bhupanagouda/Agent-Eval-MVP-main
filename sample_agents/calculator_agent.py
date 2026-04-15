@@ -225,6 +225,7 @@ class ChatResponse(BaseModel):
     output: str
     tool_calls: Optional[List[Dict[str, Any]]] = None
     latency_ms: Optional[int] = None
+    trace: Optional[List[Dict[str, Any]]] = None
 
 
 @app.get("/")
@@ -261,51 +262,74 @@ async def describe():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     start = time.time()
-    tool_calls = []
-    output = ""
 
-    intent = detect_intent(request.input)
+    # --- Pipeline node functions ---
 
-    if intent["type"] == "currency":
-        tool_calls.append({
-            "name": "convert_currency",
-            "args": {"amount": intent["amount"], "from": intent["from"], "to": intent["to"]},
-        })
-        result = await convert_currency(intent["amount"], intent["from"], intent["to"])
-        if result:
-            output = (
-                f"{result['amount']} {result['from']} = {result['result']} {result['to']}\n"
-                f"Exchange rate: 1 {result['from']} = {result['rate']} {result['to']}"
-            )
-        else:
-            output = f"Could not convert {intent['from']} to {intent['to']}. Please check the currency codes."
+    def detect_intent_node(state: dict) -> dict:
+        """Node 1: Detect what the user wants (country/currency/math)."""
+        intent = detect_intent(state["query"])
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["intent"] = intent
+        return state
 
-    elif intent["type"] == "country":
-        tool_calls.append({"name": "get_country_info", "args": {"country": intent["country"]}})
-        info = await get_country_info(intent["country"])
-        if info:
-            output = format_country_info(info)
-        else:
-            output = f"Could not find country '{intent['country']}'. Please check the name and try again."
+    async def execute_node(state: dict) -> dict:
+        """Node 2: Execute the detected intent."""
+        intent = state["intermediate"]["intent"]
+        state = dict(state)
+        state["tool_calls"] = list(state.get("tool_calls", []))
+        output = ""
 
-    elif intent["type"] == "math":
-        expr = intent["expression"]
-        tool_calls.append({"name": "calculate", "args": {"expression": expr}})
-        result = safe_eval(expr)
-        if result is not None:
-            # Format nicely
-            if result == int(result):
-                output = f"{expr} = {int(result)}"
+        if intent["type"] == "currency":
+            state["tool_calls"].append({
+                "name": "convert_currency",
+                "args": {"amount": intent["amount"], "from": intent["from"], "to": intent["to"]},
+            })
+            result = await convert_currency(intent["amount"], intent["from"], intent["to"])
+            if result:
+                output = (
+                    f"{result['amount']} {result['from']} = {result['result']} {result['to']}\n"
+                    f"Exchange rate: 1 {result['from']} = {result['rate']} {result['to']}"
+                )
             else:
-                output = f"{expr} = {result}"
+                output = f"Could not convert {intent['from']} to {intent['to']}. Please check the currency codes."
+
+        elif intent["type"] == "country":
+            state["tool_calls"].append({"name": "get_country_info", "args": {"country": intent["country"]}})
+            info = await get_country_info(intent["country"])
+            if info:
+                output = format_country_info(info)
+            else:
+                output = f"Could not find country '{intent['country']}'. Please check the name and try again."
+
+        elif intent["type"] == "math":
+            expr = intent["expression"]
+            state["tool_calls"].append({"name": "calculate", "args": {"expression": expr}})
+            result = safe_eval(expr)
+            if result is not None:
+                if result == int(result):
+                    output = f"{expr} = {int(result)}"
+                else:
+                    output = f"{expr} = {result}"
+            else:
+                output = f"Could not evaluate expression: {expr}"
         else:
-            output = f"Could not evaluate expression: {expr}"
+            output = "I can help with country information, currency conversion, or math. Try: 'info about France', 'convert 100 USD to EUR', or 'calculate 15 * 23'"
 
-    else:
-        output = "I can help with country information, currency conversion, or math. Try: 'info about France', 'convert 100 USD to EUR', or 'calculate 15 * 23'"
+        state["output"] = output
+        return state
 
+    # --- Run steps sequentially ---
+    state = {"query": request.input, "intermediate": {}, "tool_calls": [], "output": "", "errors": []}
+    state = detect_intent_node(state)
+    state = await execute_node(state)
     latency = int((time.time() - start) * 1000)
-    return ChatResponse(output=output, tool_calls=tool_calls, latency_ms=latency)
+
+    return ChatResponse(
+        output=state.get("output", ""),
+        tool_calls=state.get("tool_calls", []),
+        latency_ms=latency,
+    )
 
 
 def main():

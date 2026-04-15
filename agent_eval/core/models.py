@@ -7,7 +7,21 @@ Simple, minimal data classes for tests, suites, results, and batches.
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List, Dict
+import math
 import uuid
+
+
+def _safe_score(score) -> float:
+    """Sanitize a score value — convert NaN/None/inf to 0.0."""
+    if score is None:
+        return 0.0
+    try:
+        f = float(score)
+        if math.isnan(f) or math.isinf(f):
+            return 0.0
+        return f
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def generate_id() -> str:
@@ -28,6 +42,7 @@ class Test:
     expected_tool_calls: Optional[List[Dict]] = None  # For tool-use validation
     trajectory: Optional[Dict] = None  # {match_type, expected_calls, check_args}
     rubrics: Optional[List[str]] = None  # Custom evaluation criteria
+    expected_behavior: Optional[Dict] = None  # Agent-aware: {tools_used, max_steps, must_recover, ...}
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict:
@@ -43,6 +58,7 @@ class Test:
             "expected_tool_calls": self.expected_tool_calls,
             "trajectory": self.trajectory,
             "rubrics": self.rubrics,
+            "expected_behavior": self.expected_behavior,
             "created_at": self.created_at,
         }
 
@@ -99,6 +115,14 @@ class Result:
     expected: Optional[str] = None
     trajectory_result: Optional[Dict] = None  # TrajectoryResult as dict
     rubric_results: Optional[List[Dict]] = None  # [{rubric, matched, keywords}]
+    tool_calls: Optional[List[Dict]] = None  # Actual tool calls from agent
+    trace: Optional[List[Dict]] = None  # Agent node execution trace
+    otel_spans: Optional[List[Dict]] = None  # OTel performance spans (timing per step)
+    rca_result: Optional[Dict] = None  # Root Cause Analysis diagnosis
+    healing_result: Optional[Dict] = None  # Self-Healing recommendation
+    gate_result: Optional[Dict] = None  # Deployment Gate verdict
+    status: str = "evaluated"  # "pending" = captured only, "evaluated" = scores attached
+    evaluated_at: Optional[str] = None  # When evaluation was performed
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict:
@@ -112,19 +136,33 @@ class Result:
             "input": self.input,
             "output": self.output,
             "expected": self.expected,
-            "score": round(self.score, 1) if self.score is not None else 0,
+            "score": round(_safe_score(self.score), 1),
             "passed": self.passed,
             "latency_ms": self.latency_ms,
             "evaluations": [
-                {"metric": e.metric, "score": round(e.score, 1), "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')}
+                {"metric": e.metric, "score": round(_safe_score(e.score), 1), "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')}
                 for e in self.evaluations
             ],
+            "status": self.status,
+            "evaluated_at": self.evaluated_at,
             "created_at": self.created_at,
         }
         if self.trajectory_result:
             d["trajectory_result"] = self.trajectory_result
         if self.rubric_results:
             d["rubric_results"] = self.rubric_results
+        if self.tool_calls:
+            d["tool_calls"] = self.tool_calls
+        if self.trace:
+            d["trace"] = self.trace
+        if self.otel_spans:
+            d["otel_spans"] = self.otel_spans
+        if self.rca_result:
+            d["rca_result"] = self.rca_result
+        if self.healing_result:
+            d["healing_result"] = self.healing_result
+        if self.gate_result:
+            d["gate_result"] = self.gate_result
         return d
 
 

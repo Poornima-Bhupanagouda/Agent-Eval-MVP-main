@@ -1,0 +1,68 @@
+# HR Pipeline Chain Test Suite
+# Tests the 3-agent chain: Policy Lookup → Summarizer → Compliance
+#
+# These tests send HR policy questions through the full pipeline:
+#   1. Policy Lookup Agent (8011) finds relevant KB sections
+#   2. Summarizer Agent (8012) condenses the policy text
+#   3. Compliance Agent (8013) checks the summary for compliance
+#
+# Usage:
+#   1. Import this file via the UI: Suites tab → Import YAML
+#   2. Or create a Chain in the UI and run these inputs manually
+
+name: "HR Pipeline Chain Tests"
+description: "Tests for the Policy Lookup → Summarizer → Compliance chain"
+endpoint: "http://127.0.0.1:8011/chat"  # First agent in chain (Policy Lookup)
+tags:
+  - hr
+  - chain
+  - pipeline
+
+tests:
+  - name: "PTO policy lookup"
+    input: "How many PTO days do employees get per year?"
+    expected: "15 days, 20 days, 25 days, 30 days, years of service"
+    context:
+      - "All full-time employees accrue PTO based on years of service"
+
+  - name: "Sick leave policy"
+    input: "What is the sick leave policy?"
+    expected: "10 sick days, doctor's note, 3 consecutive days"
+    context:
+      - "Employees receive 10 sick days per year separate from PTO"
+
+  - name: "Parental leave details"
+    input: "How long is parental leave?"
+    expected: "16 weeks, 4 weeks, primary caregiver, secondary caregiver"
+    context:
+      - "Primary caregiver 16 weeks paid leave secondary caregiver 4 weeks"
+
+  - name: "Health insurance plans"
+    input: "What health insurance plans are available?"
+    expected: "PPO, HMO, HDHP, deductible, premium"
+    context:
+      - "Three plans available PPO HMO and High-Deductible Health Plan"
+
+  - name: "401k matching"
+    input: "Does the company match 401k contributions?"
+    expected: "match, 3%, 2%, 4%, vesting"
+    context:
+      - "Company matches 100% of first 3% and 50% of next 2%"
+
+  - name: "Bereavement leave"
+    input: "How many bereavement leave days are provided?"
+    expected: "5 days, 3 days, immediate family, extended family"
+    context:
+      - "Immediate family 5 days paid extended family 3 days paid"
+
+  - name: "Tuition reimbursement"
+    input: "Is tuition reimbursement available?"
+    expected: "$5,250, grade B, accredited, 1 year"
+    context:
+      - "Up to $5,250 per year for job-related courses at accredited institutions"
+
+  - name: "Leave request process"
+    input: "How do I request time off?"
+    expected: "HR portal, 2 weeks, manager approval"
+    context:
+      - "Submit leave requests through HR portal at least 2 weeks in advance"

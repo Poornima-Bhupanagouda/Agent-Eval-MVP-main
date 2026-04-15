@@ -91,6 +91,8 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     output: str
+    trace: Optional[list] = None
+    retrieved_context: Optional[List[str]] = None  # Context chunks used to generate answer
 
 
 # === Document Parsing ===
@@ -572,12 +574,11 @@ def is_discovery_prompt(text: str) -> bool:
 def chat(request: ChatRequest) -> ChatResponse:
     """
     Chat endpoint - answers questions from KB folder knowledge base.
-
-    Uses request context when provided; otherwise falls back to KB folder.
+    Powered by traced pipeline for traceable execution.
     """
     query = request.input
 
-    # Handle discovery prompts
+    # Handle discovery prompts (no graph needed)
     if is_discovery_prompt(query):
         llm_status = f"with {LLM_MODEL_NAME} powered answers" if LLM_CLIENT else "with context-based answers"
         return ChatResponse(
@@ -586,33 +587,74 @@ def chat(request: ChatRequest) -> ChatResponse:
                    f"Ask me questions about company policies, benefits, or procedures."
         )
 
-    # Prefer evaluator-provided context (for uploaded docs), fallback to KB corpus.
-    active_corpus = [c for c in (request.context or []) if isinstance(c, str) and c.strip()]
-    if not active_corpus:
-        active_corpus = KNOWLEDGE_BASE
+    # --- Pipeline node functions ---
 
-    # Check if any corpus is available
-    if not active_corpus:
-        return ChatResponse(
-            output=(
+    def retrieve_node(state: dict) -> dict:
+        """Node 1: Retrieve relevant chunks from the knowledge base."""
+        q = state["query"]
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["tool_calls"] = list(state.get("tool_calls", []))
+
+        # Prefer evaluator-provided context, fallback to KB corpus
+        active_corpus = [c for c in (request.context or []) if isinstance(c, str) and c.strip()]
+        if not active_corpus:
+            active_corpus = KNOWLEDGE_BASE
+
+        if not active_corpus:
+            state["output"] = (
                 "No context available. Upload context in Agent Eval or add documents to the KB folder "
                 "and restart the agent."
             )
-        )
+            return state
 
-    # Find relevant chunks from the selected corpus
-    relevant_chunks = find_relevant_chunks(query, active_corpus, top_k=5)
+        state["tool_calls"].append({"name": "find_relevant_chunks", "args": {"query": q, "top_k": 5}})
+        relevant_chunks = find_relevant_chunks(q, active_corpus, top_k=5)
+        state["intermediate"]["relevant_chunks"] = relevant_chunks
 
-    if not relevant_chunks:
-        return ChatResponse(
-            output="I searched the knowledge base but couldn't find specific information on that topic. "
-                   "Try asking about employee benefits, PTO policies, health insurance, or other HR-related topics covered in our documents."
-        )
+        # Descriptive summary for trace visualization
+        state["_node_summary"] = f"Retrieved {len(relevant_chunks)} relevant chunks from {len(active_corpus)} documents"
+        return state
 
-    # Generate answer from relevant KB content
-    answer = generate_answer(query, relevant_chunks)
+    def generate_node(state: dict) -> dict:
+        """Node 2: Generate answer from retrieved context."""
+        state = dict(state)
+        if state.get("output"):
+            return state  # error already set
+        chunks = state["intermediate"].get("relevant_chunks", [])
+        if not chunks:
+            state["output"] = (
+                "I searched the knowledge base but couldn't find specific information on that topic. "
+                "Try asking about employee benefits, PTO policies, health insurance, or other HR-related topics covered in our documents."
+            )
+            return state
+        state["tool_calls"] = list(state.get("tool_calls", []))
+        state["tool_calls"].append({"name": "generate_answer", "args": {"num_chunks": len(chunks)}})
+        state["output"] = generate_answer(state["query"], chunks)
 
-    return ChatResponse(output=answer)
+        # Descriptive summary for trace visualization
+        output_len = len(state["output"].split())
+        mode = "LLM Gateway" if LLM_CLIENT else "context extraction"
+        state["_node_summary"] = f"Generated {output_len}-word answer from {len(chunks)} chunks via {mode}"
+        return state
+
+    # --- Run steps sequentially ---
+    state = {"query": query, "intermediate": {}, "tool_calls": [], "output": "", "errors": []}
+    state = retrieve_node(state)
+    state = generate_node(state)
+
+    # Extract retrieved chunks so the evaluator can run RAG metrics (faithfulness, etc.)
+    retrieved_chunks = None
+    intermediate = state.get("intermediate")
+    if isinstance(intermediate, dict):
+        chunks = intermediate.get("relevant_chunks")
+        if chunks:
+            retrieved_chunks = chunks
+
+    return ChatResponse(
+        output=state.get("output", ""),
+        retrieved_context=retrieved_chunks,
+    )
 
 
 # === Startup ===

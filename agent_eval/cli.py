@@ -6,6 +6,7 @@ Simple command-line interface for running evaluations.
 
 import argparse
 import asyncio
+import os
 import sys
 import json
 from pathlib import Path
@@ -49,6 +50,23 @@ def main():
     run_parser.add_argument("--output-file", help="Write results to file (JSON)")
     run_parser.add_argument("--concurrency", type=int, default=1, help="Parallel test execution (1-20)")
 
+    # Capture command (Phase 1: execute and save as PENDING)
+    capture_parser = subparsers.add_parser("capture", help="Capture agent responses without evaluating (Phase 1)")
+    capture_parser.add_argument("endpoint", help="Agent endpoint URL")
+    capture_parser.add_argument("patterns", nargs="+", help="YAML test file patterns")
+    capture_parser.add_argument("--concurrency", type=int, default=1, help="Parallel execution (1-20)")
+    capture_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Evaluate-pending command (Phase 2: score pending artifacts)
+    eval_pending_parser = subparsers.add_parser("evaluate-pending", help="Evaluate all pending artifacts (Phase 2)")
+    eval_pending_parser.add_argument("--metrics", nargs="+", help="Metrics to run")
+    eval_pending_parser.add_argument("--threshold", type=float, default=70.0, help="Pass threshold")
+    eval_pending_parser.add_argument("--limit", type=int, default=100, help="Max pending artifacts to evaluate")
+    eval_pending_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Pending command (list pending artifacts)
+    pending_parser = subparsers.add_parser("pending", help="List pending artifacts awaiting evaluation")
+
     args = parser.parse_args()
 
     if args.command == "start":
@@ -57,9 +75,28 @@ def main():
         sys.exit(run_test(args))
     elif args.command == "run":
         sys.exit(run_yaml_tests(args))
+    elif args.command == "capture":
+        sys.exit(run_capture(args))
+    elif args.command == "evaluate-pending":
+        sys.exit(run_evaluate_pending(args))
+    elif args.command == "pending":
+        sys.exit(show_pending(args))
     else:
         parser.print_help()
         sys.exit(0)
+
+
+def _init_tracing():
+    """Initialize OpenTelemetry tracing (always-on when packages are installed)."""
+    try:
+        from agent_eval.core.otel_tracing import init_otel_tracing, is_otel_enabled
+        if is_otel_enabled():
+            ok = init_otel_tracing()
+            if ok:
+                endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+                print(f"  OpenTelemetry tracing: enabled → {endpoint}")
+    except ImportError:
+        pass
 
 
 def start_server(args):
@@ -69,6 +106,7 @@ def start_server(args):
 
     print(f"\n  Lilly Agent Eval v3.0.0")
     print(f"  Starting server at http://{args.host}:{args.port}")
+    _init_tracing()
     print(f"  Press Ctrl+C to stop\n")
 
     uvicorn.run(
@@ -81,6 +119,8 @@ def start_server(args):
 
 def run_test(args) -> int:
     """Run a quick test from command line."""
+    _init_tracing()
+
     async def _run():
         executor = Executor()
         evaluator = Evaluator()
@@ -133,6 +173,7 @@ def run_yaml_tests(args) -> int:
     """Run YAML test files."""
     import glob
     import yaml
+    _init_tracing()
 
     async def _run():
         executor = Executor()
@@ -306,6 +347,166 @@ def run_yaml_tests(args) -> int:
         return 0 if len(failed_tests) == 0 else 1
 
     return asyncio.run(_run())
+
+
+def run_capture(args) -> int:
+    """Phase 1: Execute agent and save raw artifacts as PENDING (no evaluation)."""
+    import glob
+    import yaml
+
+    async def _run():
+        executor = Executor()
+        from agent_eval.core.storage import Storage
+        storage = Storage()
+
+        yaml_files = []
+        for pattern in args.patterns:
+            yaml_files.extend(glob.glob(pattern))
+
+        if not yaml_files:
+            print(f"No YAML files found matching: {args.patterns}")
+            return 1
+
+        print(f"Phase 1: Capturing agent responses (no evaluation)")
+        print(f"Found {len(yaml_files)} test file(s)")
+
+        captured = 0
+        capture_ids = []
+
+        for yaml_file in yaml_files:
+            print(f"\n  Executing: {yaml_file}")
+
+            with open(yaml_file) as f:
+                suite = yaml.safe_load(f)
+
+            endpoint = args.endpoint or suite.get("endpoint")
+            tests = suite.get("tests", [])
+
+            for i, test in enumerate(tests):
+                test_name = test.get("name", f"Test {i+1}")
+                test_input = test.get("input", "")
+                test_expected = test.get("expected") or test.get("ground_truth")
+
+                try:
+                    exec_result = await executor.execute(endpoint, test_input)
+                except Exception as e:
+                    print(f"    [ERR] {test_name}: {e}")
+                    continue
+
+                if exec_result.error:
+                    print(f"    [ERR] {test_name}: {exec_result.error}")
+                    continue
+
+                result_id = storage.save_pending(
+                    endpoint=endpoint,
+                    input_text=test_input,
+                    output=exec_result.output,
+                    latency_ms=exec_result.latency_ms,
+                    expected=test_expected,
+                    tool_calls=exec_result.tool_calls,
+                    trace=exec_result.trace,
+                )
+
+                captured += 1
+                capture_ids.append(result_id)
+                print(f"    [PENDING] {test_name} → {result_id} ({exec_result.latency_ms}ms)")
+
+        if args.json:
+            print(json.dumps({"captured": captured, "ids": capture_ids}, indent=2))
+        else:
+            print(f"\nCaptured {captured} artifacts as PENDING")
+            print(f"Run 'agent-eval evaluate-pending' to score them")
+
+        return 0
+
+    return asyncio.run(_run())
+
+
+def run_evaluate_pending(args) -> int:
+    """Phase 2: Evaluate all pending artifacts."""
+    from agent_eval.core.storage import Storage
+    storage = Storage()
+    evaluator = Evaluator()
+
+    pending = storage.get_pending(limit=args.limit)
+
+    if not pending:
+        print("No pending artifacts to evaluate.")
+        return 0
+
+    print(f"Phase 2: Evaluating {len(pending)} pending artifact(s)")
+
+    evaluated = 0
+    passed_count = 0
+    results_summary = []
+
+    for result in pending:
+        eval_results = evaluator.evaluate(
+            input_text=result.input,
+            output=result.output,
+            expected=result.expected,
+            context=None,
+            metrics=args.metrics,
+            threshold=args.threshold,
+            tool_calls=result.tool_calls,
+            trace=result.trace,
+        )
+
+        all_passed = all(r.passed for r in eval_results)
+        avg_score = sum(r.score for r in eval_results) / len(eval_results) if eval_results else 0
+
+        storage.update_to_evaluated(
+            result_id=result.id,
+            score=round(avg_score, 1),
+            passed=all_passed,
+            evaluations=eval_results,
+        )
+
+        evaluated += 1
+        if all_passed:
+            passed_count += 1
+
+        status = "PASS" if all_passed else "FAIL"
+        print(f"  [{status}] {result.id} - Score: {avg_score:.1f}%")
+
+        results_summary.append({
+            "id": result.id,
+            "score": round(avg_score, 1),
+            "passed": all_passed,
+        })
+
+    if args.json:
+        print(json.dumps({
+            "evaluated": evaluated,
+            "passed": passed_count,
+            "failed": evaluated - passed_count,
+            "results": results_summary,
+        }, indent=2))
+    else:
+        print(f"\nEvaluated: {evaluated}")
+        print(f"Passed: {passed_count}")
+        print(f"Failed: {evaluated - passed_count}")
+
+    return 0
+
+
+def show_pending(args) -> int:
+    """Show pending artifacts awaiting evaluation."""
+    from agent_eval.core.storage import Storage
+    storage = Storage()
+
+    count = storage.get_pending_count()
+    pending = storage.get_pending(limit=20)
+
+    print(f"Pending artifacts: {count}")
+    if pending:
+        print(f"\nRecent pending (showing up to 20):")
+        for r in pending:
+            print(f"  {r.id}  |  {r.endpoint}  |  {r.input[:40]}...  |  {r.created_at}")
+    else:
+        print("No pending artifacts.")
+
+    return 0
 
 
 if __name__ == "__main__":

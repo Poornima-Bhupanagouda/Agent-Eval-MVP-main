@@ -520,15 +520,37 @@ class AgentIntrospector:
 
 
 def get_suggested_metrics(agent_type: str) -> List[str]:
-    """Get suggested evaluation metrics based on agent type."""
-    base_metrics = ["answer_relevancy"]
+    """Get suggested evaluation metrics based on agent type.
+
+    Returns a curated, non-overlapping set of metrics.  Redundant metrics
+    across frameworks (DeepEval / RAGAS / TruLens) are deduplicated so users
+    see a focused list instead of 35+ pills.
+    """
+    base_metrics = ["answer_relevancy", "toxicity", "task_completion"]
 
     type_metrics = {
-        "rag": ["faithfulness", "precision_at_k", "recall_at_k"],
-        "conversational": ["coherence", "context_retention"],
-        "tool_using": ["tool_correctness", "tool_sequence"],
-        "orchestrator": ["tool_correctness", "tool_sequence", "task_completion"],
-        "simple": ["answer_relevancy", "similarity"],
+        "rag": [
+            # DeepEval core
+            "faithfulness", "contextual_relevancy",
+            # RAGAS (uses real RAGAS library — more rigorous chain-of-thought)
+            "ragas_faithfulness", "ragas_context_precision", "ragas_context_recall",
+            "ragas_answer_correctness",
+        ],
+        "conversational": [
+            "coherence", "context_retention", "memory_retention",
+            "trulens_coherence", "trulens_helpfulness",
+        ],
+        "tool_using": [
+            "tool_correctness", "tool_args_accuracy", "tool_sequence",
+        ],
+        "orchestrator": [
+            "tool_correctness", "tool_args_accuracy", "tool_sequence",
+            "trajectory_score",
+        ],
+        "simple": [
+            "similarity",
+            "trulens_coherence", "trulens_helpfulness",
+        ],
     }
 
     return base_metrics + type_metrics.get(agent_type, [])

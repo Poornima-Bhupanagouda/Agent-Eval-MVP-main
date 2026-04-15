@@ -40,14 +40,16 @@ class TestGenerator:
     # Question templates by fact type
     QUESTION_TEMPLATES = {
         "numeric": [
-            "How many {topic}?",
-            "What is the number of {topic}?",
-            "How much {topic}?",
+            "What is the {topic} amount or limit?",
+            "How much is the {topic}?",
+        ],
+        "duration": [
+            "How many days of {topic} are provided?",
+            "What is the duration for {topic}?",
         ],
         "definition": [
             "What is {topic}?",
             "Explain {topic}.",
-            "Describe {topic}.",
         ],
         "policy": [
             "What is the policy on {topic}?",
@@ -58,7 +60,7 @@ class TestGenerator:
             "What are the requirements for {topic}?",
         ],
         "process": [
-            "How do I {topic}?",
+            "What are the steps for {topic}?",
             "What is the process for {topic}?",
         ],
     }
@@ -168,24 +170,36 @@ class TestGenerator:
         """Extract factual claims from a section."""
         facts = []
 
-        # Pattern 1: Numeric facts ("X days", "$X per year", "X%")
+        # Skip section titles that are too generic (like "Document")
+        if section_title.lower() in ("document", "untitled", ""):
+            section_title = "general"
+
+        # Pattern 1: Numeric facts ("X days", "$X per year", "X%", "INR X")
         numeric_pattern = re.compile(
-            r'([^.!?\n]+?(?:\$[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?%?)\s*(?:days?|weeks?|months?|years?|hours?|sessions?|per\s+\w+|of\s+\w+|salary)[^.!?\n]*)',
+            r'([^.!?\n]+?(?:\$[\d,]+(?:\.\d+)?|INR\s*[\d,]+(?:\.\d+)?|[\d,]+(?:\.\d+)?%?)\s*(?:days?|weeks?|months?|years?|hours?|sessions?|per\s+\w+|of\s+\w+|salary|per\s+annum)[^.!?\n]*)',
             re.IGNORECASE
         )
         for match in numeric_pattern.finditer(text):
             sentence = match.group(0).strip()
             if len(sentence) > 15:
+                # Determine sub-type: duration vs monetary
+                sub_type = "numeric"
+                if any(w in sentence.lower() for w in ['day', 'week', 'month', 'year', 'duration']):
+                    sub_type = "duration"
                 facts.append({
-                    "type": "numeric",
+                    "type": sub_type,
                     "claim": sentence,
                     "section": section_title,
+                    "full_sentence": sentence,
                 })
 
-        # Pattern 2: Bullet points with key information
+        # Pattern 2: Bullet points with key information ("Key: value" format)
         bullet_pattern = re.compile(r'^\s*[-•*]\s+\*?\*?(.+?)(?:\*?\*?)$', re.MULTILINE)
         for match in bullet_pattern.finditer(text):
             bullet_text = match.group(1).strip().rstrip(':')
+            # Clean markdown bold markers
+            bullet_text = re.sub(r'\*\*(.+?)\*\*', r'\1', bullet_text)
+            bullet_text = bullet_text.strip('*').strip()
             if len(bullet_text) > 20 and ':' in bullet_text:
                 facts.append({
                     "type": "definition",
@@ -203,6 +217,9 @@ class TestGenerator:
             answer = match.group(2).strip()
             # Take first sentence of answer
             first_sentence = re.split(r'[.!?]\s', answer)[0]
+            # Clean markdown
+            first_sentence = re.sub(r'\*\*(.+?)\*\*', r'\1', first_sentence)
+            first_sentence = first_sentence.strip('*').strip()
             facts.append({
                 "type": "qa",
                 "question": question,
@@ -233,36 +250,74 @@ class TestGenerator:
         claim = self._clean_markdown(fact["claim"])
         section = self._clean_markdown(fact["section"])
 
+        # Skip overly generic sections — try to extract a topic from the claim instead
+        generic_names = ("document", "untitled", "general", "")
+        source_stem = Path(source_file).stem.replace('_', ' ').replace('-', ' ').title()
+        # Detect filename-based sections (e.g., "Employee Benefits Guide D4")
+        is_generic = section.lower() in generic_names or section.lower() == source_stem.lower()
+
+        if is_generic:
+            # Extract a meaningful topic from the claim itself
+            topic_from_claim = self._extract_topic(claim, section)
+            if topic_from_claim and len(topic_from_claim) > 3:
+                section = topic_from_claim.title()
+            else:
+                section = source_stem
+
         # Generate question based on fact type
         if fact_type == "qa":
             question = self._clean_markdown(fact.get("question", f"What about {section.lower()}?"))
             expected = claim
-        elif fact_type == "numeric":
-            # Use section title as the topic for numeric questions
-            topic = section.lower()
-            question = f"What is the {topic} policy?"
-            if any(w in claim.lower() for w in ['day', 'week', 'month', 'year']):
-                question = f"How many {topic} days or duration?"
-            elif '$' in claim or 'inr' in claim.lower():
-                question = f"What is the cost or amount for {topic}?"
+            metrics = ["answer_relevancy", "faithfulness", "contextual_relevancy"]
+        elif fact_type == "duration":
+            # Extract the specific subject from the claim (e.g., "education leave", "PL", "casual leaves")
+            subject = self._extract_subject_from_claim(claim)
+            if any(w in claim.lower() for w in ['week', 'weeks']):
+                question = f"How many weeks of {subject} are provided?"
+            elif any(w in claim.lower() for w in ['day', 'days']):
+                question = f"How many days of {subject} are provided?"
+            elif any(w in claim.lower() for w in ['month', 'months']):
+                question = f"What is the {subject} duration in months?"
+            elif any(w in claim.lower() for w in ['year', 'years']):
+                question = f"What is the yearly {subject} allowance?"
+            else:
+                question = f"What is the duration for {subject}?"
             expected = claim
+            metrics = ["answer_relevancy", "faithfulness", "correctness"]
+        elif fact_type == "numeric":
+            subject = self._extract_subject_from_claim(claim)
+            if '$' in claim or 'inr' in claim.lower():
+                question = f"What is the cost or amount for {subject}?"
+            elif '%' in claim:
+                question = f"What is the percentage for {subject}?"
+            else:
+                question = f"What is the {subject} amount or limit?"
+            expected = claim
+            metrics = ["answer_relevancy", "faithfulness", "correctness"]
         elif fact_type == "definition":
             # For "key: value" bullet points
             if ':' in claim:
                 key, value = claim.split(':', 1)
-                topic = self._clean_markdown(key.strip().lower())
-                question = f"What is the {topic} policy?"
-                expected = self._clean_markdown(value.strip())
+                key_clean = self._clean_markdown(key.strip().lower())
+                value_clean = self._clean_markdown(value.strip())
+                # Build question using both section context AND the key
+                if section.lower() != key_clean:
+                    question = f"What is the {key_clean} under {section.lower()}?"
+                else:
+                    question = f"What is {key_clean}?"
+                expected = value_clean
             else:
                 topic = self._extract_topic(claim, section)
                 question = self._pick_question(fact_type, topic)
                 expected = claim
+            metrics = ["answer_relevancy", "faithfulness"]
         elif fact_type == "process":
             topic = section.lower().replace("process", "").strip()
             if not topic:
                 topic = "this"
-            question = f"What is the process for {topic}?"
+            question = f"What are the steps for {topic}?"
             expected = claim
+            metrics = ["answer_relevancy", "faithfulness", "task_completion"]
         else:
             return None
 
@@ -284,7 +339,7 @@ class TestGenerator:
             input=question,
             expected=expected,
             context=context_chunks,
-            metrics=["answer_relevancy", "faithfulness", "similarity"],
+            metrics=metrics,
             source_file=source_file,
             difficulty=self._estimate_difficulty(fact_type, claim),
         )
@@ -294,30 +349,48 @@ class TestGenerator:
         text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)  # Bold
         text = re.sub(r'\*(.+?)\*', r'\1', text)  # Italic
         text = re.sub(r'`(.+?)`', r'\1', text)  # Code
+        text = re.sub(r'#{1,4}\s*', '', text)  # Headers
         text = text.strip('*').strip()
+        # Remove leftover double-asterisks
+        text = text.replace('**', '')
         return text
 
     def _extract_topic(self, claim: str, section: str) -> str:
         """Extract the topic/subject from a factual claim."""
-        # Use section title as topic fallback
-        topic = section.lower()
+        clean = self._clean_markdown(claim).lower().strip()
 
-        # Try to extract a more specific topic from the claim
-        # Remove leading articles and conjunctions
-        clean = re.sub(r'^(the|a|an|all|each|every)\s+', '', claim.lower())
+        # Try to find a meaningful noun phrase after common verbs
+        # e.g. "You get 5 days of education leave" → "education leave"
+        after_verb = re.search(
+            r'\b(?:of|for|to|towards|on|under|during|regarding)\s+(.{5,40}?)(?:\s*(?:per|in|at|from|that|which|,|\.|\(|$))',
+            clean
+        )
+        if after_verb:
+            topic = after_verb.group(1).strip().strip('.,;:')
+            # Remove leading articles
+            topic = re.sub(r'^(?:the|a|an)\s+', '', topic).strip()
+            if len(topic) >= 4 and topic not in ('your', 'their', 'this', 'that', 'salary'):
+                return topic
 
-        # Take the first noun phrase (up to the first verb)
-        verb_pattern = re.compile(r'\b(is|are|was|were|will|can|may|must|shall|should|receive|accrue|get|earn|provide|offer|cost)\b')
-        verb_match = verb_pattern.search(clean)
-        if verb_match:
-            topic = clean[:verb_match.start()].strip()
+        # Try to extract topic from "X leave", "X insurance", "X benefit" patterns
+        domain_match = re.search(
+            r'(\w[\w\s]{2,25}?)\s+(?:leave|insurance|benefit|plan|allowance|coverage|policy|reimbursement|stipend|program|days?|weeks?)',
+            clean
+        )
+        if domain_match:
+            topic = domain_match.group(1).strip()
+            topic = re.sub(r'^(?:the|a|an|your|our|all|each)\s+', '', topic).strip()
+            if len(topic) >= 3:
+                return topic
 
-        # Clean up
-        topic = topic.strip('- *:').strip()
-        if len(topic) < 3:
-            topic = section.lower()
+        # Fallback: use section title if it's not generic
+        if section.lower() not in ("document", "untitled", "general", ""):
+            return section.lower()
 
-        return topic
+        # Last resort: take first meaningful words from claim
+        words = re.sub(r'^(?:the|a|an|you|we|they|all|each|every|at\s+\w+,?)\s+', '', clean).split()[:4]
+        topic = ' '.join(words).strip('.,;:')
+        return topic if len(topic) >= 3 else section.lower()
 
     def _pick_question(self, fact_type: str, topic: str) -> str:
         """Pick a question template for the fact type."""
@@ -325,6 +398,43 @@ class TestGenerator:
         templates = self.QUESTION_TEMPLATES.get(fact_type, self.QUESTION_TEMPLATES["definition"])
         template = random.choice(templates)
         return template.format(topic=topic)
+
+    def _extract_subject_from_claim(self, claim: str) -> str:
+        """Extract the main subject/object being described in a factual claim.
+
+        Examples:
+            'You also get 5 days of education leave' → 'education leave'
+            'At Lilly, you are entitled to a total of 25 days of PL per annum' → 'privilege leave (PL)'
+            '• 26 weeks for the first two children' → 'maternity leave for first two children'
+            'Dental costs $25/month' → 'dental coverage'
+            'At Lilly, 12% of the basic salary is deducted' → 'salary deduction (PF)'
+        """
+        clean = self._clean_markdown(claim).lower().strip()
+        clean = clean.lstrip('•-* ').strip()
+
+        # Pattern 1: "X days/weeks of SUBJECT" — extract SUBJECT
+        of_match = re.search(r'\d+\s*(?:days?|weeks?|months?)\s+(?:of|for)\s+(.{3,40}?)(?:\s*(?:per|in|at|from|,|\.|and|which|that|$))', clean)
+        if of_match:
+            subject = of_match.group(1).strip().strip('.,;:')
+            return re.sub(r'^(?:the|a|an)\s+', '', subject).strip()
+
+        # Pattern 2: "SUBJECT: value" or "SUBJECT - value"
+        colon_match = re.match(r'^([^:]{3,40}):', clean)
+        if colon_match:
+            subject = colon_match.group(1).strip()
+            return re.sub(r'^(?:the|a|an)\s+', '', subject).strip()
+
+        # Pattern 3: look for domain keywords (leave, insurance, benefit, plan, etc.)
+        domain_match = re.search(
+            r'((?:\w+\s+){0,3}(?:leave|insurance|benefit|plan|allowance|coverage|reimbursement|stipend|program|contribution|salary|deduction))',
+            clean
+        )
+        if domain_match:
+            subject = domain_match.group(1).strip()
+            return re.sub(r'^(?:the|a|an|your|our)\s+', '', subject).strip()
+
+        # Fallback: use _extract_topic
+        return self._extract_topic(claim, "")
 
     def _build_context_chunks(self, section_text: str) -> List[str]:
         """Build context chunks from section text."""
@@ -354,17 +464,18 @@ class TestGenerator:
 
     def _generate_test_name(self, section: str, fact_type: str, claim: str) -> str:
         """Generate a readable test name."""
-        clean_section = self._clean_markdown(re.sub(r'[^\w\s]', '', section).strip())
+        clean_section = self._clean_markdown(re.sub(r'[^\w\s\-()]', '', section).strip())
         claim_clean = self._clean_markdown(claim)
-        claim_words = claim_clean.split()[:5]
+        claim_words = claim_clean.split()[:6]
         claim_snippet = ' '.join(claim_words)
-        return f"{clean_section} - {claim_snippet}"
+        type_label = {"qa": "Q&A", "numeric": "Fact", "duration": "Duration", "definition": "Info", "process": "Steps"}.get(fact_type, fact_type)
+        return f"{clean_section} - {type_label} - {claim_snippet}"
 
     def _estimate_difficulty(self, fact_type: str, claim: str) -> str:
         """Estimate test difficulty."""
         if fact_type == "qa":
             return "easy"
-        elif fact_type == "numeric" and '$' in claim:
+        elif fact_type in ("numeric", "duration") and ('$' in claim or 'inr' in claim.lower()):
             return "medium"
         elif fact_type == "process":
             return "hard"

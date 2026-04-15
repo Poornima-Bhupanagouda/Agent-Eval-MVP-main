@@ -27,6 +27,9 @@ from urllib.parse import urlparse
 from agent_eval.core.evaluator import Evaluator, EvalResult
 from agent_eval.core.executor import Executor
 from agent_eval.core.storage import Storage
+from agent_eval.core.rca import RCAAgent, rca_agent
+from agent_eval.core.self_healing import SelfHealingAgent, healing_agent
+from agent_eval.core.deployment_gate import DeploymentGate, deployment_gate
 from agent_eval.core.models import Test, Suite, Result, Batch, EvalMetric, RegisteredAgent, ABComparison, MultiAgentBatch, AgentChain, ChainStep, ChainResult, ChainStepResult, ChainRun, ConversationTest, ConversationTurn, ConversationTurnResult, ConversationResult, Workflow, WorkflowAgent
 from agent_eval.core.file_parser import FileParser, parse_file
 from agent_eval.core.introspector import AgentIntrospector, AgentProfile, get_suggested_metrics
@@ -68,6 +71,9 @@ STANDALONE_AGENTS = [
     {"name": "Wiki Agent",           "endpoint": "http://127.0.0.1:8005/chat", "port": 8005, "health_path": "/", "tags": ["demo", "tool_using"]},
     {"name": "Calculator Agent",     "endpoint": "http://127.0.0.1:8006/chat", "port": 8006, "health_path": "/", "tags": ["demo", "tool_using"]},
     {"name": "Travel Orchestrator",  "endpoint": "http://127.0.0.1:8010/chat", "port": 8010, "health_path": "/", "tags": ["demo", "orchestrator"]},
+    {"name": "Policy Lookup Agent",  "endpoint": "http://127.0.0.1:8011/chat", "port": 8011, "health_path": "/", "tags": ["demo", "rag"]},
+    {"name": "Summarizer Agent",     "endpoint": "http://127.0.0.1:8012/chat", "port": 8012, "health_path": "/", "tags": ["demo", "simple"]},
+    {"name": "Compliance Agent",     "endpoint": "http://127.0.0.1:8013/chat", "port": 8013, "health_path": "/", "tags": ["demo", "simple"]},
 ]
 
 # Local demo agent launch map for automatic startup on demand.
@@ -78,6 +84,9 @@ DEMO_AGENT_STARTUP = {
     8005: {"module": "sample_agents.wiki_agent", "depends_on": []},
     8006: {"module": "sample_agents.calculator_agent", "depends_on": []},
     8010: {"module": "sample_agents.travel_orchestrator", "depends_on": [8004, 8005, 8006]},
+    8011: {"module": "sample_agents.policy_lookup_agent", "depends_on": []},
+    8012: {"module": "sample_agents.summarizer_agent", "depends_on": []},
+    8013: {"module": "sample_agents.compliance_agent", "depends_on": []},
 }
 
 _demo_agent_processes: Dict[int, subprocess.Popen] = {}
@@ -203,6 +212,13 @@ async def _execute_conversation_with_autostart(
 async def startup_register():
     """Auto-register standalone agents and load workflow YAMLs at startup."""
     import httpx
+
+    # Initialize OpenTelemetry tracing if configured
+    try:
+        from agent_eval.core.otel_tracing import init_otel_tracing
+        init_otel_tracing()
+    except ImportError:
+        pass
 
     # 1. Register standalone agents
     for agent_def in STANDALONE_AGENTS:
@@ -416,6 +432,7 @@ class QuickTestRequest(BaseModel):
     threshold: Optional[float] = Field(None, description="Pass threshold")
     auth: Optional[AuthConfigRequest] = Field(None, description="Authentication config")
     agent_type: Optional[str] = Field(None, description="Agent type for auto metric selection (rag, conversational, tool_using, orchestrator, simple)")
+    expected_tool_calls: Optional[List[dict]] = Field(None, description="Expected tool calls for tool metrics evaluation")
 
 
 class TestResponse(BaseModel):
@@ -429,6 +446,11 @@ class TestResponse(BaseModel):
     expected: Optional[str] = None
     trajectory_result: Optional[dict] = None
     rubric_results: Optional[List[dict]] = None
+    tool_calls: Optional[List[dict]] = None
+    trace: Optional[List[dict]] = None
+    rca_result: Optional[dict] = None
+    otel_spans: Optional[List[dict]] = None
+    gate_result: Optional[dict] = None
 
 
 class SuiteCreate(BaseModel):
@@ -464,7 +486,10 @@ async def home():
     """Serve the single-page application."""
     template_path = Path(__file__).parent / "templates" / "index.html"
     if template_path.exists():
-        return HTMLResponse(template_path.read_text(encoding="utf-8"))
+        return HTMLResponse(
+            template_path.read_text(encoding="utf-8"),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"},
+        )
     return HTMLResponse("<h1>Lilly Agent Eval</h1><p>Template not found</p>")
 
 
@@ -472,6 +497,111 @@ async def home():
 async def health():
     """Health check endpoint."""
     return {"status": "healthy", "version": "3.0.0"}
+
+
+@app.get("/api/tracing-status")
+async def tracing_status():
+    """Return current tracing configuration and Jaeger connectivity."""
+    import os
+
+    # OTel status
+    otel_enabled = False
+    otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    otel_service = os.getenv("OTEL_SERVICE_NAME", "agent-eval-platform")
+    jaeger_reachable = False
+    jaeger_ui_url = None
+
+    try:
+        from agent_eval.core.otel_tracing import is_otel_enabled
+        otel_enabled = is_otel_enabled()
+    except ImportError:
+        pass
+
+    # Check if Jaeger UI is reachable
+    if otel_enabled:
+        try:
+            import httpx
+            # Jaeger UI is typically on port 16686 (same host as OTLP on 4317)
+            jaeger_host = otel_endpoint.replace("http://", "").replace("https://", "").split(":")[0]
+            jaeger_ui_url = f"http://{jaeger_host}:16686"
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                resp = await client.get(f"{jaeger_ui_url}/api/services")
+                jaeger_reachable = resp.status_code == 200
+        except Exception:
+            jaeger_reachable = False
+
+    # LangSmith status
+    langsmith_enabled = False
+    try:
+        from agent_eval.core.tracing import is_langsmith_enabled
+        langsmith_enabled = is_langsmith_enabled()
+    except ImportError:
+        pass
+
+    return {
+        "otel": {
+            "enabled": otel_enabled,
+            "endpoint": otel_endpoint,
+            "service_name": otel_service,
+            "jaeger_reachable": jaeger_reachable,
+            "jaeger_ui_url": jaeger_ui_url if jaeger_reachable else None,
+            "view_traces": f"{jaeger_ui_url}/search?service={otel_service}" if jaeger_reachable else None,
+        },
+        "langsmith": {
+            "enabled": langsmith_enabled,
+            "dashboard": "https://smith.langchain.com" if langsmith_enabled else None,
+        },
+        "how_to_view": {
+            "step_1": "Start Jaeger: docker-compose up -d",
+            "step_2": f"Open Jaeger UI: {jaeger_ui_url or 'http://localhost:16686'}",
+            "step_3": f"Select service: {otel_service}",
+            "step_4": "Click 'Find Traces' to see all evaluation traces",
+        },
+    }
+
+
+# === Built-in Trace Viewer (no Docker/Jaeger required) ===
+
+@app.get("/api/traces")
+async def get_traces(limit: int = 50):
+    """Get recent traces from the built-in in-memory trace store.
+
+    No Docker or Jaeger needed — traces are stored in memory and
+    viewable directly in the web UI or via this API endpoint.
+    """
+    try:
+        from agent_eval.core.otel_tracing import get_stored_traces, is_otel_enabled
+        if not is_otel_enabled():
+            return {"traces": [], "info": "OTel tracing is disabled. Set OTEL_ENABLED=true in .env"}
+        traces = get_stored_traces(limit=min(limit, 200))
+        return {"traces": traces, "count": len(traces)}
+    except Exception as e:
+        return {"traces": [], "error": str(e)}
+
+
+@app.get("/api/traces/{trace_id}")
+async def get_trace_detail(trace_id: str):
+    """Get all spans for a specific trace."""
+    try:
+        from agent_eval.core.otel_tracing import get_stored_traces
+        all_traces = get_stored_traces(limit=200)
+        for t in all_traces:
+            if t["trace_id"] == trace_id:
+                return t
+        return {"error": "Trace not found"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.delete("/api/traces")
+async def clear_traces():
+    """Clear all stored traces."""
+    try:
+        from agent_eval.core.otel_tracing import clear_stored_traces
+        clear_stored_traces()
+        return {"status": "cleared"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # === Quick Test ===
@@ -486,7 +616,19 @@ async def run_test(request: QuickTestRequest):
     2. Runs selected evaluations
     3. Returns results
     """
+    # OTel: create a parent span that groups execute + all metric spans into one trace
     try:
+        from agent_eval.core.otel_tracing import otel_span as _otel_span
+        _parent = _otel_span("evaluate_test", {
+            "test.endpoint": request.endpoint,
+            "test.input_preview": request.input[:200],
+        })
+    except ImportError:
+        from contextlib import nullcontext
+        _parent = nullcontext()
+
+    with _parent as _pspan:
+      try:
         # Convert auth config to headers (with env fallback)
         headers = _resolve_auth_headers(auth=request.auth, endpoint=request.endpoint)
 
@@ -501,25 +643,92 @@ async def run_test(request: QuickTestRequest):
         if exec_result.error:
             raise HTTPException(status_code=400, detail=exec_result.error)
 
+        # For orchestrators: auto-build expected_tool_calls from actual calls
+        # so tool metrics are always evaluated (user doesn't have to fill it in)
+        expected_tools = request.expected_tool_calls
+        if not expected_tools and request.agent_type == "orchestrator" and exec_result.tool_calls:
+            expected_tools = [
+                {"tool": tc.get("name", tc.get("tool", "")), "args": {k: v for k, v in tc.get("args", {}).items() if k != "endpoint"}}
+                for tc in exec_result.tool_calls
+            ]
+
+        # Merge context: prefer agent-retrieved context for evaluation.
+        # For RAG metrics (faithfulness, context precision, etc.) we want to
+        # evaluate the agent's OWN retrieval, not user-provided test context.
+        # User context is still sent to the agent (above), but for scoring we
+        # use what the agent actually retrieved. Fall back to user context only
+        # when the agent doesn't return retrieved_context.
+        if exec_result.retrieved_context:
+            eval_context = list(exec_result.retrieved_context)
+            # Optionally append user context chunks the agent didn't return
+            if request.context:
+                existing = set(eval_context)
+                for chunk in request.context:
+                    if chunk not in existing:
+                        eval_context.append(chunk)
+        else:
+            eval_context = request.context
+
         # Run evaluations (in thread to avoid blocking event loop during DeepEval LLM calls)
         eval_results = await asyncio.to_thread(
             evaluator.evaluate,
             input_text=request.input,
             output=exec_result.output,
             expected=request.expected,
-            context=request.context,
+            context=eval_context,
             metrics=request.metrics,
             threshold=request.threshold,
             agent_type=request.agent_type,
+            tool_calls=exec_result.tool_calls,
+            expected_tool_calls=expected_tools,
+            trace=exec_result.trace,
         )
 
         # Calculate overall score
         if eval_results:
+            # Sanitize NaN scores (can happen when RAGAS/TruLens LLM calls fail)
+            import math
+            for r in eval_results:
+                if r.score is None or (isinstance(r.score, float) and math.isnan(r.score)):
+                    r.score = 0.0
+                    r.passed = False
+                    if r.reason:
+                        r.reason = f"[LLM scoring failed — score reset to 0] {r.reason}"
+                    else:
+                        r.reason = "[LLM scoring failed — score reset to 0]"
+
             avg_score = sum(r.score for r in eval_results) / len(eval_results)
             all_passed = all(r.passed for r in eval_results)
         else:
             avg_score = 0
             all_passed = False
+
+        # ── Root Cause Analysis (STEP 5) ──
+        rca_diagnosis = None
+        if eval_results and not all_passed:
+            try:
+                rca_out = rca_agent.analyze(
+                    evaluations=[{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason} for r in eval_results],
+                    trace=exec_result.trace,
+                    tool_calls=exec_result.tool_calls,
+                    latency_ms=exec_result.latency_ms,
+                )
+                if rca_out.has_failures:
+                    rca_diagnosis = rca_out.to_dict()
+            except Exception as e:
+                logger.warning(f"RCA analysis failed: {e}")
+
+        # ── Deployment Gate (STEP 7) ──
+        gate_verdict = None
+        if eval_results:
+            try:
+                verdict = deployment_gate.evaluate(
+                    evaluations=[{"metric": r.metric, "score": r.score, "passed": r.passed, "reason": r.reason} for r in eval_results],
+                    latency_ms=exec_result.latency_ms,
+                )
+                gate_verdict = verdict.to_dict()
+            except Exception as e:
+                logger.warning(f"Deployment gate failed: {e}")
 
         # Create result object
         result = Result(
@@ -540,10 +749,39 @@ async def run_test(request: QuickTestRequest):
                 )
                 for r in eval_results
             ],
+            tool_calls=exec_result.tool_calls,
+            trace=exec_result.trace,
+            rca_result=rca_diagnosis,
+            gate_result=gate_verdict,
         )
 
         # Save to history
         storage.save_result(result)
+
+        # Capture OTel spans for this test and update result in DB
+        if _pspan and hasattr(_pspan, 'get_span_context') and _pspan.get_span_context():
+            try:
+                from agent_eval.core.otel_tracing import flush_spans, get_spans_for_trace
+                flush_spans()
+                tid = format(_pspan.get_span_context().trace_id, "032x")
+                otel_spans = get_spans_for_trace(tid)
+                if otel_spans:
+                    result.otel_spans = otel_spans
+                    conn = storage._get_conn()
+                    import json as _json
+                    conn.execute("UPDATE results SET otel_spans = ? WHERE id = ?",
+                                 (_json.dumps(otel_spans), result.id))
+                    conn.commit()
+                    conn.close()
+            except Exception as ex:
+                logger.debug(f"Failed to capture OTel spans: {ex}")
+
+        # Record final score on parent OTel span
+        if _pspan and hasattr(_pspan, 'set_attribute'):
+            _pspan.set_attribute("test.score", round(avg_score, 1))
+            _pspan.set_attribute("test.passed", all_passed)
+            _pspan.set_attribute("test.metrics_count", len(eval_results) if eval_results else 0)
+            _pspan.set_attribute("test.latency_ms", exec_result.latency_ms)
 
         return TestResponse(
             id=result.id,
@@ -556,10 +794,15 @@ async def run_test(request: QuickTestRequest):
                 {"metric": r.metric, "score": round(r.score, 1), "passed": r.passed, "reason": r.reason, "scored_by": getattr(r, 'scored_by', 'heuristic')}
                 for r in eval_results
             ],
+            tool_calls=exec_result.tool_calls,
+            trace=exec_result.trace,
+            rca_result=rca_diagnosis,
+            otel_spans=result.otel_spans,
+            gate_result=gate_verdict,
         )
-    except HTTPException:
+      except HTTPException:
         raise
-    except Exception as e:
+      except Exception as e:
         logger.exception("Unexpected error in /api/test")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
@@ -716,6 +959,10 @@ async def import_yaml_suite(file: UploadFile = File(...)):
             context=t.get('context'),
             metrics=t.get('metrics'),
             name=t.get('name'),
+            expected_tool_calls=t.get('expected_tool_calls'),
+            trajectory=t.get('trajectory'),
+            rubrics=t.get('rubrics'),
+            expected_behavior=t.get('expected_behavior'),
         )
         storage.save_test(test)
         tests_created.append(test.to_dict())
@@ -768,6 +1015,10 @@ async def import_yaml_suite_from_path(request: Request):
             context=t.get('context'),
             metrics=t.get('metrics'),
             name=t.get('name'),
+            expected_tool_calls=t.get('expected_tool_calls'),
+            trajectory=t.get('trajectory'),
+            rubrics=t.get('rubrics'),
+            expected_behavior=t.get('expected_behavior'),
         )
         storage.save_test(test)
         tests_created.append(test.to_dict())
@@ -950,6 +1201,9 @@ async def run_suite(suite_id: str, endpoint: Optional[str] = None, threshold: Op
                         context=test.context,
                         metrics=test.metrics,
                         threshold=threshold,
+                        tool_calls=exec_result.tool_calls,
+                        expected_tool_calls=getattr(test, 'expected_tool_calls', None),
+                        trace=exec_result.trace,
                     )
 
                     avg_score = sum(r.score for r in eval_results) / len(eval_results) if eval_results else 0
@@ -969,6 +1223,8 @@ async def run_suite(suite_id: str, endpoint: Optional[str] = None, threshold: Op
                             EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic'))
                             for r in eval_results
                         ],
+                        tool_calls=exec_result.tool_calls,
+                        trace=exec_result.trace,
                     )
                     storage.save_result(result)
 
@@ -1058,6 +1314,8 @@ async def run_batch(request: BatchRequest):
                 context=test_data.context,
                 metrics=test_data.metrics,
                 threshold=request.threshold,
+                tool_calls=exec_result.tool_calls,
+                trace=exec_result.trace,
             )
 
             avg_score = sum(r.score for r in eval_results) / len(eval_results) if eval_results else 0
@@ -1080,6 +1338,8 @@ async def run_batch(request: BatchRequest):
                     EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic'))
                     for r in eval_results
                 ],
+                tool_calls=exec_result.tool_calls,
+                trace=exec_result.trace,
             )
             storage.save_result(result)
 
@@ -1493,6 +1753,183 @@ async def generate_json_report(request: ReportRequest):
 async def list_metrics():
     """List available evaluation metrics."""
     return Evaluator.list_metrics()
+
+
+# === Root Cause Analysis ===
+
+@app.post("/api/rca/analyze")
+async def analyze_root_cause(request: Request):
+    """
+    Run Root Cause Analysis on evaluation results.
+
+    Accepts either a result_id (to analyze a stored result) or
+    inline evaluations + trace data.
+    """
+    body = await request.json()
+
+    result_id = body.get("result_id")
+    if result_id:
+        result = storage.get_result(result_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Result not found")
+        evaluations = [
+            {"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason}
+            for e in result.evaluations
+        ]
+        trace = result.trace
+        tool_calls = result.tool_calls
+        latency_ms = result.latency_ms
+    else:
+        evaluations = body.get("evaluations", [])
+        trace = body.get("trace")
+        tool_calls = body.get("tool_calls")
+        latency_ms = body.get("latency_ms", 0)
+
+    if not evaluations:
+        raise HTTPException(status_code=400, detail="No evaluations provided")
+
+    rca_out = rca_agent.analyze(
+        evaluations=evaluations,
+        trace=trace,
+        tool_calls=tool_calls,
+        latency_ms=latency_ms,
+        expected_behavior=body.get("expected_behavior"),
+    )
+
+    return rca_out.to_dict()
+
+
+# === Self-Healing ===
+
+@app.post("/api/heal")
+async def self_heal(request: Request):
+    """
+    Run Self-Healing Agent on a failed test result.
+
+    Accepts a result_id to re-run the original test with config/prompt variants,
+    or inline RCA diagnoses + test parameters for ad-hoc healing.
+
+    The agent experiments safely and returns a recommendation — it does NOT
+    auto-deploy or overwrite production config.
+    """
+    body = await request.json()
+
+    # Get RCA diagnoses + original test params
+    result_id = body.get("result_id")
+    if result_id:
+        result = storage.get_result(result_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Result not found")
+
+        rca_diagnoses = (result.rca_result or {}).get("diagnoses", [])
+        if not rca_diagnoses:
+            # Run RCA first if not already done
+            rca_out = rca_agent.analyze(
+                evaluations=[
+                    {"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason}
+                    for e in result.evaluations
+                ],
+                trace=result.trace,
+                tool_calls=result.tool_calls,
+                latency_ms=result.latency_ms,
+            )
+            rca_diagnoses = [d.to_dict() for d in rca_out.diagnoses]
+
+        original_scores = {e.metric: e.score for e in result.evaluations}
+        endpoint = result.endpoint
+        input_text = result.input
+        expected = result.expected
+        context = body.get("context")  # Context must be provided (not stored in Result)
+        metrics = [e.metric for e in result.evaluations]
+        agent_type = body.get("agent_type")
+    else:
+        rca_diagnoses = body.get("rca_diagnoses", [])
+        original_scores = body.get("original_scores", {})
+        endpoint = body.get("endpoint")
+        input_text = body.get("input")
+        expected = body.get("expected")
+        context = body.get("context")
+        metrics = body.get("metrics")
+        agent_type = body.get("agent_type")
+
+    if not rca_diagnoses:
+        raise HTTPException(status_code=400, detail="No RCA diagnoses provided. Run /api/rca/analyze first.")
+    if not endpoint or not input_text:
+        raise HTTPException(status_code=400, detail="endpoint and input are required")
+
+    # Run self-healing
+    healing_out = await healing_agent.heal(
+        rca_diagnoses=rca_diagnoses,
+        original_scores=original_scores,
+        endpoint=endpoint,
+        input_text=input_text,
+        expected=expected,
+        context=context,
+        metrics=metrics,
+        agent_type=agent_type,
+        executor=Executor(),
+        evaluator=Evaluator(),
+    )
+
+    # If healing was triggered from a stored result, update it
+    if result_id and result:
+        result.healing_result = healing_out.to_dict()
+        storage.save_result(result)
+
+    return healing_out.to_dict()
+
+
+# === Deployment Gate ===
+
+@app.post("/api/gate")
+async def deployment_gate_check(request: Request):
+    """
+    Run the Deployment Gate to get a GO / NO-GO decision.
+
+    Accepts a result_id (to evaluate a stored result) or
+    inline evaluations + latency data.
+
+    The gate uses a weighted composite score:
+        0.40 × Faithfulness + 0.30 × Answer Relevancy
+      + 0.20 × Groundedness + 0.10 × Latency Factor
+
+    Threshold: 0.70 → GO, else NO-GO.
+    Safety metrics (toxicity, bias) are hard-blocks.
+    """
+    body = await request.json()
+
+    result_id = body.get("result_id")
+    if result_id:
+        result = storage.get_result(result_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Result not found")
+        evaluations = [
+            {"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason}
+            for e in result.evaluations
+        ]
+        latency_ms = result.latency_ms
+        healing_result = result.healing_result
+    else:
+        evaluations = body.get("evaluations", [])
+        latency_ms = body.get("latency_ms", 0)
+        healing_result = body.get("healing_result")
+
+    if not evaluations:
+        raise HTTPException(status_code=400, detail="No evaluations provided")
+
+    verdict = deployment_gate.evaluate(
+        evaluations=evaluations,
+        latency_ms=latency_ms,
+        healing_result=healing_result,
+        threshold=body.get("threshold"),
+    )
+
+    # If triggered from a stored result, persist the gate verdict
+    if result_id and result:
+        result.gate_result = verdict.to_dict()
+        storage.save_result(result)
+
+    return verdict.to_dict()
 
 
 # === File Upload for RAG Context ===
@@ -2082,6 +2519,7 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
         rubrics = test_data.get("rubrics")
         trajectory_spec = test_data.get("trajectory")
         expected_tool_calls = test_data.get("expected_tool_calls")
+        expected_behavior = test_data.get("expected_behavior")
         if not trajectory_spec and expected_tool_calls:
             trajectory_spec = {"match_type": "ANY_ORDER", "expected_calls": expected_tool_calls, "check_args": False}
 
@@ -2115,6 +2553,7 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
                 expected_tool_calls=expected_tool_calls,
                 trajectory_spec=trajectory_spec,
                 rubrics=rubrics,
+                expected_behavior=expected_behavior,
             )
 
             avg_score = sum(r.score for r in eval_results) / len(eval_results) if eval_results else 0
@@ -2149,6 +2588,8 @@ async def evaluate_workflow_inline(workflow_id: str, req: Request):
                 evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic')) for r in eval_results],
                 trajectory_result=trajectory_result,
                 rubric_results=rubric_results,
+                tool_calls=exec_result.tool_calls,
+                trace=exec_result.trace,
             )
             storage.save_result(result_entry)
 
@@ -2271,6 +2712,7 @@ async def workflow_quick_test(workflow_id: str, req: Request):
             tool_calls=exec_result.tool_calls or [],
             expected_tool_calls=expected_tool_calls,
             trajectory_spec=trajectory_spec,
+            trace=exec_result.trace,
         )
 
         # ── Tool routing analysis ──
@@ -2304,6 +2746,8 @@ async def workflow_quick_test(workflow_id: str, req: Request):
             passed=passed,
             latency_ms=exec_result.latency_ms,
             evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic')) for r in eval_results],
+            tool_calls=exec_result.tool_calls,
+            trace=exec_result.trace,
         )
         storage.save_result(result)
 
@@ -2358,6 +2802,7 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
         # Build trajectory spec: explicit trajectory block or fallback from expected_tool_calls
         trajectory_spec = test_data.get("trajectory")
         expected_tool_calls = test_data.get("expected_tool_calls")
+        expected_behavior = test_data.get("expected_behavior")
         if not trajectory_spec and expected_tool_calls:
             trajectory_spec = {"match_type": "ANY_ORDER", "expected_calls": expected_tool_calls, "check_args": False}
 
@@ -2392,6 +2837,8 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
                 expected_tool_calls=expected_tool_calls,
                 trajectory_spec=trajectory_spec,
                 rubrics=rubrics,
+                trace=exec_result.trace,
+                expected_behavior=expected_behavior,
             )
 
             avg_score = sum(r.score for r in eval_results) / len(eval_results) if eval_results else 0
@@ -2427,6 +2874,8 @@ async def _run_evaluation(tests_path: Path, endpoint: str, agent_name: str = "Or
                 evaluations=[EvalMetric(metric=r.metric, score=r.score, passed=r.passed, reason=r.reason, scored_by=getattr(r, 'scored_by', 'heuristic')) for r in eval_results],
                 trajectory_result=trajectory_result,
                 rubric_results=rubric_results,
+                tool_calls=exec_result.tool_calls,
+                trace=exec_result.trace,
             )
             storage.save_result(result_entry)
 
@@ -3143,28 +3592,50 @@ async def run_chain(chain_id: str, request: ChainRunRequest):
 
             result = await _execute_with_autostart(agent.endpoint, step_input, headers=auth_headers)
 
-            # Per-step evaluation
+            # Per-step evaluation — ALWAYS evaluate every step
             step_evals = []
             step_tool_calls = result.tool_calls
             step_score = None
 
-            if step.expected_output or step.metrics or step.expected_tool_calls:
-                eval_metrics = step.metrics or ["answer_relevancy"]
-                if step.expected_tool_calls and "tool_correctness" not in eval_metrics:
+            # Build metrics list: use step config if set, otherwise auto-select
+            if step.metrics:
+                eval_metrics = list(step.metrics)
+            else:
+                # Auto-select relevant metrics based on available data
+                eval_metrics = ["answer_relevancy", "toxicity", "task_completion"]
+                if step.expected_output or request.expected:
+                    eval_metrics.append("similarity")
+                if step.context:
+                    eval_metrics.extend(["faithfulness", "contextual_relevancy"])
+                if step_tool_calls:
                     eval_metrics.append("tool_correctness")
+                if result.trace:
+                    eval_metrics.append("agent_reasoning")
+
+            # Add tool_correctness if expected tool calls specified
+            if step.expected_tool_calls and "tool_correctness" not in eval_metrics:
+                eval_metrics.append("tool_correctness")
+
+            # Run evaluation
+            try:
                 eval_results = await asyncio.to_thread(
                     evaluator.evaluate,
                     input_text=step_input,
                     output=result.output,
-                    expected=step.expected_output,
-                    context=step.context,
+                    expected=step.expected_output or request.expected,
+                    context=step.context or request.context,
                     metrics=eval_metrics,
                     tool_calls=step_tool_calls,
                     expected_tool_calls=step.expected_tool_calls,
+                    trace=result.trace,
                 )
                 step_evals = [{"metric": e.metric, "score": e.score, "passed": e.passed, "reason": e.reason, "scored_by": getattr(e, 'scored_by', 'heuristic')} for e in eval_results]
                 if step_evals:
                     step_score = sum(e["score"] for e in step_evals) / len(step_evals)
+            except Exception as eval_err:
+                logger.warning(f"Chain step evaluation error: {eval_err}")
+                step_evals = []
+                step_score = None
 
             step_results.append(ChainStepResult(
                 agent_id=step.agent_id,
@@ -3238,12 +3709,19 @@ async def run_chain(chain_id: str, request: ChainRunRequest):
     # Save as a chain run
     run_name = request.name or f"Run {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
     routing_accuracy = (routing_passed / routing_checks * 100) if routing_checks > 0 else None
+
+    # Determine pass/fail using metric scores (threshold-based)
+    eval_threshold = request.threshold or 70.0
+    scored_step_list = [s for s in step_results if s.score is not None]
+    avg_chain_score = sum(s.score for s in scored_step_list) / len(scored_step_list) if scored_step_list else 0
+    chain_passed = success and avg_chain_score >= eval_threshold
+
     chain_run = ChainRun(
         chain_id=chain_id,
         name=run_name,
         status="completed",
         total_tests=1,
-        passed_tests=1 if success else 0,
+        passed_tests=1 if chain_passed else 0,
         avg_latency_ms=total_latency,
         routing_accuracy=routing_accuracy,
         results=[chain_result],
@@ -3255,9 +3733,12 @@ async def run_chain(chain_id: str, request: ChainRunRequest):
         "run_id": chain_run.id,
         "chain_id": chain_id,
         "success": success,
+        "passed": chain_passed,
         "test_input": request.input,
         "final_output": final_output,
         "total_latency_ms": total_latency,
+        "avg_score": round(avg_chain_score, 1),
+        "threshold": eval_threshold,
         "step_results": [s.to_dict() for s in step_results],
     }
     if routing_accuracy is not None:
@@ -4010,6 +4491,8 @@ async def run_evaluation_wizard(request: WizardRequest):
                 evaluations=eval_metrics,
                 batch_id=batch.id,
                 expected=test_expected,
+                tool_calls=exec_result.tool_calls,
+                trace=exec_result.trace,
             )
             storage.save_result(result)
             results.append(result)
@@ -4380,6 +4863,7 @@ class ConsistencyRequest(BaseModel):
     threshold: float = 70.0
     runs: int = Field(3, ge=2, le=10, description="Number of runs (2-10)")
     auth: Optional[dict] = None
+    agent_type: Optional[str] = Field(None, description="Agent type for metric auto-selection")
 
 
 @app.post("/api/test-consistency")
@@ -4410,6 +4894,7 @@ async def run_consistency_test(request: ConsistencyRequest):
                 context=request.context,
                 metrics=request.metrics,
                 threshold=request.threshold,
+                agent_type=request.agent_type,
             )
 
             avg_score = sum(e.score for e in evals) / len(evals) if evals else 0

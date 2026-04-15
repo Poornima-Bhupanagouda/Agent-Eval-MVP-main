@@ -1,0 +1,84 @@
+# ============================================================================
+# Agent-Aware Conversational Test Suite — STEP 4 of AgentEval
+# ============================================================================
+# Tests the Memory Retention metric (Metric 4 from STEP 4)
+#
+# memory_retention checks if the agent USES what it learned from earlier turns:
+#   - Does it remember the user's name?
+#   - Does it respect stated preferences (e.g., vegetarian)?
+#   - Does it maintain topic continuity?
+#
+# Pillar: Robustness (memory retention under multi-turn pressure)
+# ============================================================================
+
+name: "Agent-Aware Conversational Tests (STEP 4)"
+description: "Tests for memory retention, context preservation, and multi-turn coherence"
+endpoint: "http://localhost:8003/chat"
+
+tests:
+  # ── Memory Retention: Name Recall ────────────────────────────────────
+
+  - name: "Name recall after introduction"
+    input: "What is my name?"
+    conversation_history:
+      - role: user
+        content: "Hi, my name is Rahul"
+      - role: assistant
+        content: "Nice to meet you, Rahul!"
+      - role: user
+        content: "What is my name?"
+    expected: "Rahul"
+    metrics:
+      - answer_relevancy
+      - memory_retention
+      - context_retention
+
+  # ── Memory Retention: Preference Recall ──────────────────────────────
+
+  - name: "Preference recall - drink"
+    input: "What drink do I like?"
+    conversation_history:
+      - role: user
+        content: "I love coffee, especially lattes"
+      - role: assistant
+        content: "Great choice! I'll remember you like coffee."
+      - role: user
+        content: "What drink do I like?"
+    expected: "coffee"
+    metrics:
+      - answer_relevancy
+      - memory_retention
+      - similarity
+
+  # ── Memory Retention: Dietary Constraint ─────────────────────────────
+
+  - name: "Dietary constraint respected"
+    input: "Suggest a dinner for me"
+    conversation_history:
+      - role: user
+        content: "I am vegetarian"
+      - role: assistant
+        content: "Got it, I'll remember that."
+      - role: user
+        content: "Suggest a dinner for me"
+    expected: "vegetarian"
+    metrics:
+      - answer_relevancy
+      - memory_retention
+
+  # ── Memory Retention: Topic Continuity ───────────────────────────────
+
+  - name: "Topic continuity across turns"
+    input: "Tell me more about that"
+    conversation_history:
+      - role: user
+        content: "Tell me about artificial intelligence"
+      - role: assistant
+        content: "AI is a broad field focused on building intelligent systems."
+      - role: user
+        content: "Tell me more about that"
+    expected: "AI, artificial intelligence, machine learning"
+    metrics:
+      - answer_relevancy
+      - memory_retention
+      - coherence

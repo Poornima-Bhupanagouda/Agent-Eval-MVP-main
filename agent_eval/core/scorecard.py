@@ -29,6 +29,9 @@ METRIC_CATEGORIES = {
     "context_flow": "Orchestration",
     "coherence": "Conversation",
     "context_retention": "Conversation",
+    "node_success_rate": "Agent Internals",
+    "step_latency": "Agent Internals",
+    "agent_reasoning": "Agent Internals",
 }
 
 CATEGORY_ORDER = [
@@ -38,6 +41,7 @@ CATEGORY_ORDER = [
     "Retrieval",
     "Tool Use",
     "Orchestration",
+    "Agent Internals",
     "Conversation",
 ]
 

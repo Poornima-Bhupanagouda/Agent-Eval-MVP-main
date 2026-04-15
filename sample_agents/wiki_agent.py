@@ -44,11 +44,15 @@ def extract_topic(text: str) -> str:
         if match:
             return match.group(1).strip()
 
-    # Fallback: remove common filler words
+    # Fallback: remove common filler words but keep intent words
     stop_words = {"tell", "me", "about", "what", "is", "the", "a", "an", "please",
                   "can", "you", "do", "know", "search", "for", "find", "look", "up",
                   "give", "some", "info", "information", "on"}
-    words = [w for w in text.split() if w.lower() not in stop_words]
+    # Never strip intent-carrying words
+    keep_words = {"history", "culture", "science", "art", "geography", "economy",
+                  "politics", "religion", "language", "food", "cuisine", "music",
+                  "architecture", "war", "battle", "revolution", "ancient", "modern"}
+    words = [w for w in text.split() if w.lower() not in stop_words or w.lower() in keep_words]
     return " ".join(words).strip() if words else text.strip()
 
 
@@ -157,6 +161,7 @@ class ChatResponse(BaseModel):
     tool_calls: Optional[List[Dict[str, Any]]] = None
     sources: Optional[List[str]] = None
     latency_ms: Optional[int] = None
+    trace: Optional[List[Dict[str, Any]]] = None
 
 
 @app.get("/")
@@ -192,36 +197,92 @@ async def describe():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     start = time.time()
-    tool_calls = []
-    sources = []
 
-    topic = extract_topic(request.input)
-    if not topic:
-        return ChatResponse(
-            output="I couldn't identify a topic in your request. Try asking like: 'Tell me about the Eiffel Tower'",
-            tool_calls=[],
-            latency_ms=int((time.time() - start) * 1000),
-        )
+    # --- Pipeline node functions ---
 
-    # Tool 1: Search Wikipedia
-    tool_calls.append({"name": "search_wikipedia", "args": {"query": topic}})
-    search_results = await search_wikipedia(topic)
+    def extract_topic_node(state: dict) -> dict:
+        """Node 1: Extract the topic from the user query."""
+        topic = extract_topic(state["query"])
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["intermediate"]["topic"] = topic
+        return state
 
-    # Tool 2: Get summary of the top result
-    summary = None
-    if search_results:
-        top_title = search_results[0]["title"]
-        tool_calls.append({"name": "get_summary", "args": {"title": top_title}})
-        summary = await get_summary(top_title)
-        if summary and summary.get("url"):
-            sources.append(summary["url"])
+    async def search_node(state: dict) -> dict:
+        """Node 2: Search Wikipedia for articles."""
+        topic = state["intermediate"].get("topic")
+        state = dict(state)
+        state["tool_calls"] = list(state.get("tool_calls", []))
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        if not topic:
+            state["output"] = "I couldn't identify a topic in your request. Try asking like: 'Tell me about the Eiffel Tower'"
+            return state
+        state["tool_calls"].append({"name": "search_wikipedia", "args": {"query": topic}})
+        search_results = await search_wikipedia(topic)
+        state["intermediate"]["search_results"] = search_results
+        return state
 
-    output = format_response(topic, search_results, summary)
+    async def summarize_node(state: dict) -> dict:
+        """Node 3: Get summary of the best-matching Wikipedia result."""
+        state = dict(state)
+        if state.get("output"):
+            return state  # error path
+        search_results = state["intermediate"].get("search_results", [])
+        topic = state["intermediate"].get("topic", "").lower()
+        state["tool_calls"] = list(state.get("tool_calls", []))
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        state["metadata"] = dict(state.get("metadata", {}))
+        summary = None
+        sources = []
+        if search_results:
+            # Pick the result whose title best matches the topic
+            # Prefer exact title match, then title containing topic words
+            best = search_results[0]
+            topic_words = set(topic.split())
+            best_score = 0
+            for r in search_results:
+                title_lower = r["title"].lower()
+                # Score: count how many topic words appear in the title
+                score = sum(1 for w in topic_words if w in title_lower)
+                # Bonus for exact match
+                if topic.replace(" ", "") in title_lower.replace(" ", ""):
+                    score += 10
+                if score > best_score:
+                    best_score = score
+                    best = r
+
+            top_title = best["title"]
+            state["tool_calls"].append({"name": "get_summary", "args": {"title": top_title}})
+            summary = await get_summary(top_title)
+            if summary and summary.get("url"):
+                sources.append(summary["url"])
+        state["intermediate"]["summary"] = summary
+        state["metadata"]["sources"] = sources
+        return state
+
+    def format_node(state: dict) -> dict:
+        """Node 4: Format results into natural language."""
+        state = dict(state)
+        if state.get("output"):
+            return state  # error path
+        topic = state["intermediate"].get("topic", "")
+        search_results = state["intermediate"].get("search_results", [])
+        summary = state["intermediate"].get("summary")
+        state["output"] = format_response(topic, search_results, summary)
+        return state
+
+    # --- Run steps sequentially ---
+    state = {"query": request.input, "intermediate": {}, "tool_calls": [], "output": "", "errors": [], "metadata": {}}
+    state = extract_topic_node(state)
+    state = await search_node(state)
+    state = await summarize_node(state)
+    state = format_node(state)
     latency = int((time.time() - start) * 1000)
+    sources = state.get("metadata", {}).get("sources", [])
 
     return ChatResponse(
-        output=output,
-        tool_calls=tool_calls,
+        output=state.get("output", ""),
+        tool_calls=state.get("tool_calls", []),
         sources=sources if sources else None,
         latency_ms=latency,
     )

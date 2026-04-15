@@ -25,6 +25,11 @@ class ExecutionResult:
     error: Optional[str] = None
     raw_response: Optional[dict] = None
     tool_calls: Optional[List[Dict]] = None  # Extracted tool/function calls
+    trace: Optional[List[Dict]] = None  # Agent node execution trace
+    agent_trace: Optional[Any] = None  # Normalized AgentTrace (from tracing.py)
+    langsmith_run_id: Optional[str] = None  # LangSmith run ID for deep inspection
+    otel_trace_id: Optional[str] = None  # OpenTelemetry trace ID for Jaeger/Grafana
+    retrieved_context: Optional[List[str]] = None  # Context chunks from RAG retrieval
 
 
 class Executor:
@@ -74,29 +79,95 @@ class Executor:
         if headers:
             request_headers.update(headers)
 
+        # OTel: inject traceparent header for distributed tracing
+        try:
+            from agent_eval.core.otel_tracing import inject_trace_headers, otel_span, record_span_event
+        except ImportError:
+            inject_trace_headers = None
+            otel_span = None
+            record_span_event = None
+
+        if inject_trace_headers:
+            inject_trace_headers(request_headers)
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             # Try different payload formats
             for payload in self._get_payloads(input_text, context):
                 try:
-                    response = await client.post(
-                        endpoint,
-                        json=payload,
-                        headers=request_headers,
-                    )
+                    # OTel: wrap HTTP call in a span for distributed tracing
+                    if otel_span:
+                        _span_ctx = otel_span("execute_agent_call", {
+                            "http.method": "POST",
+                            "http.url": endpoint,
+                            "agent.input_length": len(input_text),
+                        })
+                    else:
+                        from contextlib import nullcontext
+                        _span_ctx = nullcontext()
 
-                    latency_ms = int((time.time() - start) * 1000)
+                    with _span_ctx as _active_span:
+                        response = await client.post(
+                            endpoint,
+                            json=payload,
+                            headers=request_headers,
+                        )
+
+                        latency_ms = int((time.time() - start) * 1000)
+
+                        # Record HTTP result on the span
+                        if _active_span and hasattr(_active_span, "set_attribute"):
+                            _active_span.set_attribute("http.status_code", response.status_code)
+                            _active_span.set_attribute("http.latency_ms", latency_ms)
 
                     if response.status_code == 200:
                         try:
                             data = response.json()
                             output = self._extract_output(data)
                             tool_calls = self._extract_tool_calls(data)
+                            trace = self._extract_trace(data)
+                            retrieved_context = self._extract_context(data)
+
+                            # Build normalized AgentTrace from trace data
+                            agent_trace = None
+                            langsmith_run_id = None
+                            otel_trace_id = None
+                            if trace:
+                                try:
+                                    from agent_eval.core.tracing import convert_trace_to_agent_trace
+                                    agent_trace = convert_trace_to_agent_trace(
+                                        trace_entries=trace,
+                                        tool_calls=tool_calls or [],
+                                        output=output,
+                                    )
+                                except Exception as e:
+                                    logger.debug(f"AgentTrace conversion skipped: {e}")
+
+                                # Record each trace node as an OTel span event
+                                if _active_span and hasattr(_active_span, "add_event") and record_span_event:
+                                    for node in trace:
+                                        record_span_event(_active_span, f"agent.node.{node.get('node', 'unknown')}", {
+                                            "node.result": str(node.get("result", "")),
+                                            "node.duration_ms": node.get("duration_ms", 0),
+                                            "node.error": str(node.get("error", "")),
+                                        })
+
+                            # Extract LangSmith run ID if present
+                            if isinstance(data, dict):
+                                langsmith_run_id = data.get("langsmith_run_id")
+                                # Extract OTel trace ID if agent returned one
+                                otel_trace_id = data.get("otel_trace_id")
+
                             return ExecutionResult(
                                 output=output,
                                 latency_ms=latency_ms,
                                 status_code=response.status_code,
                                 raw_response=data,
                                 tool_calls=tool_calls,
+                                trace=trace,
+                                agent_trace=agent_trace,
+                                langsmith_run_id=langsmith_run_id,
+                                otel_trace_id=otel_trace_id,
+                                retrieved_context=retrieved_context,
                             )
                         except Exception as e:
                             # Response not JSON, try text
@@ -295,6 +366,81 @@ class Executor:
                 tool_calls = nested
 
         return tool_calls if tool_calls else None
+
+    def _extract_trace(self, data: Any) -> Optional[List[Dict]]:
+        """Extract agent node execution trace from response.
+
+        Looks for trace data in common locations:
+        - {"trace": [...]}
+        - {"workflow": {"trace": [...]}}
+        - {"workflow": {"agent_responses": [...]}}  (Travel Orchestrator format)
+        - {"metadata": {"trace": [...]}}
+        """
+        if not isinstance(data, dict):
+            return None
+
+        # Direct trace key
+        trace = data.get("trace")
+        if isinstance(trace, list) and trace:
+            return trace
+
+        # Nested in workflow
+        workflow = data.get("workflow")
+        if isinstance(workflow, dict):
+            trace = workflow.get("trace")
+            if isinstance(trace, list) and trace:
+                return trace
+
+            # Convert workflow.agent_responses to trace format
+            agent_responses = workflow.get("agent_responses")
+            if isinstance(agent_responses, list) and agent_responses:
+                trace = []
+                for ar in agent_responses:
+                    if not isinstance(ar, dict):
+                        continue
+                    node = {
+                        "node": ar.get("agent") or ar.get("agent_name", "unknown"),
+                        "result": "ok" if ar.get("success", True) else "error",
+                        "duration_ms": ar.get("latency_ms", 0),
+                    }
+                    if ar.get("error"):
+                        node["error"] = str(ar["error"])
+                    if ar.get("tool_calls"):
+                        node["tool_calls"] = ar["tool_calls"]
+                    trace.append(node)
+                if trace:
+                    return trace
+
+        # Nested in metadata
+        metadata = data.get("metadata")
+        if isinstance(metadata, dict):
+            trace = metadata.get("trace")
+            if isinstance(trace, list) and trace:
+                return trace
+
+        return None
+
+    def _extract_context(self, data: Any) -> Optional[List[str]]:
+        """Extract retrieved context chunks from agent response.
+
+        Looks for context data in common locations:
+        - {"retrieved_context": [...]}
+        - {"context": [...]}
+        - {"sources": [...]}
+        - {"documents": [...]}
+        """
+        if not isinstance(data, dict):
+            return None
+
+        for key in ["retrieved_context", "context", "sources", "documents", "chunks", "retrieval_context"]:
+            ctx = data.get(key)
+            if isinstance(ctx, list) and ctx:
+                # Filter to strings only
+                strings = [s for s in ctx if isinstance(s, str) and s.strip()]
+                if strings:
+                    return strings
+
+        return None
 
     async def execute_conversation(
         self,

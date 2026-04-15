@@ -489,6 +489,7 @@ class ChatResponse(BaseModel):
     turn_number: int
     topics_remembered: List[str] = []
     latency_ms: int
+    trace: Optional[List[Dict[str, Any]]] = None
 
 
 class InfoResponse(BaseModel):
@@ -560,79 +561,106 @@ async def info():
 async def chat(request: ChatRequest):
     """
     Main conversational endpoint.
-
-    Accepts three input formats:
-    1. {"input": "Hello"}  — simple platform format
-    2. {"messages": [{"role":"user","content":"Hello"}]}  — OpenAI format
-    3. {"input": "Hello", "conversation_history": [...], "session_id": "abc"}  — platform with history
-
-    Maintains session-level memory across calls when session_id is provided.
+    Same input/output contract as before.
     """
     start = time.time()
 
-    # --- Resolve user message ---
+    # --- Resolve user message (before graph) ---
     user_message: str = ""
-
     if request.input:
         user_message = request.input.strip()
     elif request.messages:
-        # Take the last user message from messages array
         user_msgs = [m for m in request.messages if m.role == "user"]
         if not user_msgs:
             raise HTTPException(status_code=422, detail="No user message found in messages array")
         user_message = user_msgs[-1].content.strip()
     else:
         raise HTTPException(status_code=422, detail="Provide 'input' or 'messages' field")
-
     if not user_message:
         raise HTTPException(status_code=422, detail="User message cannot be empty")
 
-    # --- Resolve or create session ---
-    session_id = request.session_id or str(uuid.uuid4())
-    session = _sessions[session_id]
+    # --- Pipeline node functions ---
 
-    # Seed session history from conversation_history if platform passed it
-    # and session is fresh (avoid duplicating turns on re-runs)
-    if request.conversation_history and not session["history"]:
-        for msg in request.conversation_history:
-            session["history"].append({"role": msg.role, "content": msg.content})
+    def load_session_node(state: dict) -> dict:
+        """Node 1: Load or create session, seed history."""
+        state = dict(state)
+        state["intermediate"] = dict(state.get("intermediate", {}))
+        session_id = request.session_id or str(uuid.uuid4())
+        session = _sessions[session_id]
 
-    # Also seed from messages array if provided (covers OpenAI-format multi-turn)
-    if request.messages and not session["history"]:
-        for msg in request.messages[:-1]:  # exclude the last (current) message already handled
-            session["history"].append({"role": msg.role, "content": msg.content})
+        # Seed session history from conversation_history if platform passed it
+        if request.conversation_history and not session["history"]:
+            for msg in request.conversation_history:
+                session["history"].append({"role": msg.role, "content": msg.content})
+        if request.messages and not session["history"]:
+            for msg in request.messages[:-1]:
+                session["history"].append({"role": msg.role, "content": msg.content})
 
-    # Current history BEFORE this turn (used for context extraction in response)
-    history_before = list(session["history"])
+        history_before = list(session["history"])
+        session["history"].append({"role": "user", "content": user_message})
 
-    # Add current user turn to session memory
-    session["history"].append({"role": "user", "content": user_message})
+        state["intermediate"]["session_id"] = session_id
+        state["intermediate"]["history_before"] = history_before
 
-    # --- Generate response ---
-    output: str = ""
+        # Descriptive summary for trace visualization
+        turn_count = sum(1 for m in history_before if m.get("role") == "user")
+        state["_node_summary"] = f"Loaded session with {turn_count} prior turn(s), {len(history_before)} messages"
+        return state
 
-    # Try live LLM first
-    output = await _live_response(user_message, history_before)
+    async def generate_node(state: dict) -> dict:
+        """Node 2: Generate response (live LLM or demo)."""
+        state = dict(state)
+        history_before = state["intermediate"]["history_before"]
 
-    # Fall back to demo mode
-    if not output:
-        output = _build_demo_response(user_message, history_before)
+        output = await _live_response(user_message, history_before)
+        is_live = output is not None
+        if not output:
+            output = _build_demo_response(user_message, history_before)
 
-    # Add assistant turn to session memory
-    session["history"].append({"role": "assistant", "content": output})
+        state["output"] = output
 
-    # Extract remembered topics for metadata
-    facts = _extract_context_facts(session["history"])
-    topics = facts.get("topics", [])
-    turn_number = facts.get("turn_count", 1)
+        # Descriptive summary for trace visualization
+        mode = "LLM" if is_live else "Demo"
+        state["_node_summary"] = f"Generated {len(output.split())}-word response ({mode} mode)"
+        return state
 
+    def save_session_node(state: dict) -> dict:
+        """Node 3: Save assistant turn and extract metadata."""
+        state = dict(state)
+        session_id = state["intermediate"]["session_id"]
+        session = _sessions[session_id]
+
+        session["history"].append({"role": "assistant", "content": state["output"]})
+
+        facts = _extract_context_facts(session["history"])
+        state["metadata"] = dict(state.get("metadata", {}))
+        state["metadata"]["session_id"] = session_id
+        state["metadata"]["turn_number"] = facts.get("turn_count", 1)
+        state["metadata"]["topics"] = facts.get("topics", [])
+
+        # Descriptive summary for trace visualization
+        remembered = []
+        if facts.get("name"): remembered.append(f"name={facts['name']}")
+        if facts.get("preference"): remembered.append(f"pref={facts['preference'][:20]}")
+        if facts.get("topics"): remembered.append(f"{len(facts['topics'])} topic(s)")
+        state["_node_summary"] = f"Saved turn {facts.get('turn_count', 1)}. Memory: {', '.join(remembered) if remembered else 'no facts yet'}"
+        return state
+
+    # --- Build the pipeline ---
+    state = {"query": user_message, "intermediate": {}, "tool_calls": [], "output": "", "errors": [], "metadata": {}}
+    state = load_session_node(state)
+    state = await generate_node(state)
+    state = save_session_node(state)
+
+    # --- Return response ---
+    meta = state.get("metadata", {})
     latency_ms = int((time.time() - start) * 1000) + random.randint(10, 50)
 
     return ChatResponse(
-        output=output,
-        session_id=session_id,
-        turn_number=turn_number,
-        topics_remembered=topics,
+        output=state.get("output", ""),
+        session_id=meta.get("session_id", ""),
+        turn_number=meta.get("turn_number", 1),
+        topics_remembered=meta.get("topics", []),
         latency_ms=latency_ms,
     )
 

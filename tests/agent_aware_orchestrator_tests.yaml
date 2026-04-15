@@ -1,0 +1,144 @@
+# ============================================================================
+# Agent-Aware Test Suite — STEP 4 of AgentEval
+# ============================================================================
+# This suite evaluates BOTH:
+#   - WHAT the agent produced (output quality — DeepEval)
+#   - HOW the agent worked (process quality — trace-based metrics)
+#
+# Uses expected_behavior to define agent-aware expectations:
+#   tools_used:    Which tools/sub-agents should be invoked
+#   max_steps:     Maximum pipeline node executions allowed
+#   must_recover:  Whether the test expects error recovery behavior
+#
+# Metric Pillars:
+#   Goal Alignment  → answer_relevancy, task_completion
+#   Reasoning       → agent_reasoning, tool_order_correctness
+#   Tool Safety     → tool_usage_correctness
+#   Robustness      → failure_recovery, step_count_limit
+#   Outcome         → answer_relevancy, similarity
+# ============================================================================
+
+name: "Agent-Aware Orchestrator Tests (STEP 4)"
+description: "Tests that evaluate agent planning, tool usage, memory, and recovery using LangSmith traces"
+endpoint: "http://localhost:8010/chat"
+
+tests:
+  # ── Goal Alignment + Tool Safety ──────────────────────────────────────
+
+  - name: "Full trip planning (3 agents)"
+    input: "Plan a weekend trip to Tokyo"
+    expected: "Tokyo, weather, temperature, Japan"
+    expected_behavior:
+      tools_used: ["WeatherAgent", "WikiAgent", "CalculatorAgent"]
+      max_steps: 6
+      must_recover: false
+    metrics:
+      - answer_relevancy
+      - task_completion
+      - tool_usage_correctness
+      - tool_order_correctness
+      - agent_reasoning
+      - step_count_limit
+      - failure_recovery
+    rubrics:
+      - "includes weather or temperature data"
+      - "includes cultural or historical background"
+      - "mentions practical travel information"
+
+  # ── Reasoning + Tool Order ────────────────────────────────────────────
+
+  - name: "Weather-only routing (single agent)"
+    input: "What's the weather forecast for Berlin?"
+    expected: "Berlin, temperature, forecast"
+    expected_behavior:
+      tools_used: ["WeatherAgent"]
+      max_steps: 4
+    metrics:
+      - answer_relevancy
+      - tool_usage_correctness
+      - tool_order_correctness
+      - step_count_limit
+      - agent_reasoning
+
+  - name: "Knowledge-only routing (single agent)"
+    input: "Tell me about the history of Rome"
+    expected: "Rome, Italy, history"
+    expected_behavior:
+      tools_used: ["WikiAgent"]
+      max_steps: 4
+    metrics:
+      - answer_relevancy
+      - tool_usage_correctness
+      - agent_reasoning
+      - step_count_limit
+
+  # ── Robustness: Step Count + Loop Detection ──────────────────────────
+
+  - name: "Currency conversion (efficiency check)"
+    input: "Convert 500 USD to EUR"
+    expected: "EUR, 500"
+    expected_behavior:
+      tools_used: ["CalculatorAgent"]
+      max_steps: 4
+    metrics:
+      - task_completion
+      - tool_usage_correctness
+      - step_count_limit
+
+  # ── Robustness: Failure Recovery ─────────────────────────────────────
+
+  - name: "Error resilience - unknown location"
+    input: "What's the weather on Planet Zorgon?"
+    expected: "could not, not found, unavailable"
+    expected_behavior:
+      must_recover: true
+      max_steps: 6
+    metrics:
+      - task_completion
+      - failure_recovery
+      - step_count_limit
+
+  # ── Multi-Agent Reasoning ────────────────────────────────────────────
+
+  - name: "Multi-hop query (wiki + weather)"
+    input: "What's the capital of Australia and what's the weather there?"
+    expected: "Canberra, Australia, temperature"
+    expected_behavior:
+      tools_used: ["WikiAgent", "WeatherAgent"]
+      max_steps: 6
+    metrics:
+      - answer_relevancy
+      - task_completion
+      - tool_usage_correctness
+      - tool_order_correctness
+      - agent_reasoning
+    rubrics:
+      - "mentions Canberra as capital"
+      - "includes weather or temperature"
+
+  - name: "Complex multi-agent synthesis"
+    input: "Compare visiting London vs Barcelona - weather and things to do"
+    expected: "London, Barcelona, weather"
+    expected_behavior:
+      tools_used: ["WeatherAgent", "WikiAgent"]
+      max_steps: 8
+    metrics:
+      - answer_relevancy
+      - task_completion
+      - tool_usage_correctness
+      - step_count_limit
+      - agent_reasoning
+
+  # ── Context Preservation ─────────────────────────────────────────────
+
+  - name: "Context preservation across agents"
+    input: "I want to visit Paris. What should I know about the weather and culture?"
+    expected: "Paris, France, weather"
+    expected_behavior:
+      tools_used: ["WeatherAgent", "WikiAgent"]
+      max_steps: 6
+    metrics:
+      - answer_relevancy
+      - task_completion
+      - tool_usage_correctness
+      - agent_reasoning

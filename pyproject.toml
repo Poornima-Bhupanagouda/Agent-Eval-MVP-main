@@ -36,15 +36,34 @@ python-docx = "^1.1.0"
 openpyxl = "^3.1.0"
 pandas = "^2.2.0"
 
+# LangSmith for execution tracing and observability
+langsmith = "^0.7.0"
+
+# OpenTelemetry for open-standard distributed tracing
+opentelemetry-api = "^1.24.0"
+opentelemetry-sdk = "^1.24.0"
+opentelemetry-exporter-otlp = "^1.24.0"
+
 # Optional: DeepEval for LLM-powered evaluations
 deepeval = {version = "^1.2.0", optional = true}
 openai = {version = "^1.40.0", optional = true}
+
+# Optional: RAGAS for RAG-specific evaluation
+ragas = {version = "^0.1.0", optional = true}
+datasets = {version = "^2.14.0", optional = true}
+langchain-openai = {version = "^0.1.0", optional = true}
+
+# Optional: TruLens for feedback-based evaluation
+trulens-eval = {version = "^0.30.0", optional = true}
 
 # Optional: Statistical analysis
 scipy = {version = "^1.13.0", optional = true}
 
 [tool.poetry.extras]
 deepeval = ["deepeval", "openai"]
+ragas = ["ragas", "datasets", "langchain-openai"]
+trulens = ["trulens-eval"]
+all = ["deepeval", "openai", "ragas", "datasets", "langchain-openai", "trulens-eval", "scipy"]
 stats = ["scipy"]
 
 [tool.poetry.group.dev.dependencies]
